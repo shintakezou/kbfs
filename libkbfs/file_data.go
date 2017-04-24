@@ -1223,18 +1223,16 @@ func (fd *fileData) write(ctx context.Context, data []byte, off int64,
 		dirtyMap[ptr] = true
 	}
 
-	if topBlock.IsInd {
-		// Always make the top block dirty, so we will sync its
-		// indirect blocks.  This has the added benefit of ensuring
-		// that any write to a file while it's being sync'd will be
-		// deferred, even if it's to a block that's not currently
-		// being sync'd, since this top-most block will always be in
-		// the dirtyFiles map.
-		if err = fd.cacher(fd.rootBlockPointer(), topBlock); err != nil {
-			return newDe, nil, unrefs, newlyDirtiedChildBytes, 0, err
-		}
-		dirtyMap[fd.rootBlockPointer()] = true
+	// Always make the top block dirty, so we will sync any indirect
+	// blocks.  This has the added benefit of ensuring that any write
+	// to a file while it's being sync'd will be deferred, even if
+	// it's to a block that's not currently being sync'd, since this
+	// top-most block will always be in the dirtyFiles map.  We do
+	// this even for 0-byte writes, which indicate a forced sync.
+	if err = fd.cacher(fd.rootBlockPointer(), topBlock); err != nil {
+		return newDe, nil, unrefs, newlyDirtiedChildBytes, 0, err
 	}
+	dirtyMap[fd.rootBlockPointer()] = true
 
 	lastByteWritten := off + int64(len(data)) // not counting holes
 	bytesExtended = 0
@@ -1684,6 +1682,7 @@ func (fd *fileData) readyHelper(ctx context.Context, id tlf.ID,
 
 			bps.addNewBlock(
 				newInfo.BlockPointer, pb.pblock, readyBlockData, syncFunc)
+			bps.saveOldPtr(ptr)
 
 			parentPB.pblock.IPtrs[parentPB.childIndex].BlockInfo = newInfo
 			oldPtrs[newInfo] = ptr

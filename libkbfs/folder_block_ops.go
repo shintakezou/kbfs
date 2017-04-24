@@ -994,35 +994,20 @@ func (fbo *folderBlockOps) SetAttrInDirEntryInCache(lState *lockState,
 	return deleteTargetDirEntry
 }
 
-// ClearCachedAddsAndRemoves clears out any cached directory entry
-// adds and removes for the given dir.
-func (fbo *folderBlockOps) ClearCachedAddsAndRemoves(
-	lState *lockState, dir path) {
-	fbo.blockLock.Lock(lState)
-	defer fbo.blockLock.Unlock(lState)
-	cacheEntry, ok := fbo.deCache[dir.tailPointer().Ref()]
-	if !ok {
-		return
-	}
-
-	// If there's no dirEntry, we can just delete the whole thing.
-	if !cacheEntry.dirEntry.IsInitialized() {
-		delete(fbo.deCache, dir.tailPointer().Ref())
-		return
-	}
-
-	// Otherwise just nil out the adds and dels.
-	cacheEntry.adds = nil
-	cacheEntry.dels = nil
-	fbo.deCache[dir.tailPointer().Ref()] = cacheEntry
-}
-
 // ClearCachedRef clears any info from the cache for the given block
-// reference.
-func (fbo *folderBlockOps) ClearCachedRef(lState *lockState, ref BlockRef) {
+// reference, if it's not still dirty.  Returns false if the reference
+// wasn't cleared because it is still dirty.
+func (fbo *folderBlockOps) ClearCachedRef(
+	lState *lockState, ref BlockRef) bool {
 	fbo.blockLock.Lock(lState)
 	defer fbo.blockLock.Unlock(lState)
+	// Only clear this if there's not other outstanding refs.
+	if _, ok := fbo.unrefCache[ref]; ok {
+		return false
+	}
+
 	delete(fbo.deCache, ref)
+	return true
 }
 
 // ClearCachedDirEntry clears any info from the cache for the given
@@ -1031,12 +1016,14 @@ func (fbo *folderBlockOps) ClearCachedDirEntry(lState *lockState, dir path) {
 	fbo.blockLock.Lock(lState)
 	defer fbo.blockLock.Unlock(lState)
 	delete(fbo.deCache, dir.tailPointer().Ref())
-
-	// TODO(KBFS-2076): delete the corresponding from the dirty block
-	// cache.  Only newly-created, empty dir blocks will be in the
-	// dirty block cache, but for now let's just try to delete all
-	// dirty dirs.  (In the future, modified directories should live
-	// in there as well.)
+	err := fbo.config.DirtyBlockCache().Delete(
+		fbo.id(), dir.tailPointer(), fbo.branch())
+	if err != nil {
+		// If delete can ever fail, we should plumb this error
+		// backwards.  But for now it's a pain since this function is
+		// mainly used in defers.
+		panic(err)
+	}
 }
 
 func (fbo *folderBlockOps) updateDirtyEntryLocked(
@@ -1192,17 +1179,19 @@ func (fbo *folderBlockOps) getDirtyDirLocked(ctx context.Context,
 		return nil, err
 	}
 
+	// TODO: if rtype == blockWrite, this may create a second copy of
+	// the directory for no real reason, which is inefficient.
 	return fbo.updateWithDirtyEntriesLocked(ctx, lState, dir, dblock)
 }
 
 // GetDirtyDir returns the directory block for a dirty directory,
 // updated with all cached dirty entries.
 func (fbo *folderBlockOps) GetDirtyDir(
-	ctx context.Context, lState *lockState, kmd KeyMetadata, dir path) (
-	*DirBlock, error) {
+	ctx context.Context, lState *lockState, kmd KeyMetadata, dir path,
+	rtype blockReqType) (*DirBlock, error) {
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
-	return fbo.getDirtyDirLocked(ctx, lState, kmd, dir, blockRead)
+	return fbo.getDirtyDirLocked(ctx, lState, kmd, dir, rtype)
 }
 
 // GetDirtyDirChildren returns a map of EntryInfos for the (possibly
@@ -1269,18 +1258,18 @@ func (fbo *folderBlockOps) getDirtyParentAndEntryLocked(ctx context.Context,
 	return dblock, de, err
 }
 
-// GetDirtyParentAndEntry returns a copy of the parent DirBlock
-// (suitable for modification) of the given file, which may contain
-// entries pointing to other dirty files, and its possibly-dirty
-// DirEntry in that directory. file must have a valid parent. Use
-// GetDirtyEntry() if you only need the DirEntry.
+// GetDirtyParentAndEntry returns the parent DirBlock (which shouldn't
+// be modified) of the given file, which may contain entries pointing
+// to other dirty files, and its possibly-dirty DirEntry in that
+// directory. file must have a valid parent. Use GetDirtyEntry() if
+// you only need the DirEntry.
 func (fbo *folderBlockOps) GetDirtyParentAndEntry(
 	ctx context.Context, lState *lockState, kmd KeyMetadata, file path) (
 	*DirBlock, DirEntry, error) {
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
 	return fbo.getDirtyParentAndEntryLocked(
-		ctx, lState, kmd, file, blockWrite,
+		ctx, lState, kmd, file, blockRead,
 		true /* TODO(KBFS-2076) make this false */)
 }
 
@@ -1546,21 +1535,20 @@ func (fbo *folderBlockOps) nowUnixNano() int64 {
 	return fbo.config.Clock().Now().UnixNano()
 }
 
-// PrepRename prepares the given rename operation. It returns copies
-// of the old and new parent block (which may be the same), what is to
-// be the new DirEntry, and a local block cache. It also modifies md,
-// which must be a copy.
+// PrepRename prepares the given rename operation. It returns the old
+// and new parent block (which may be the same,and which shouldn't be
+// modified), and what is to be the new DirEntry.
 func (fbo *folderBlockOps) PrepRename(
-	ctx context.Context, lState *lockState, md *RootMetadata,
+	ctx context.Context, lState *lockState, kmd KeyMetadata,
 	oldParent path, oldName string, newParent path, newName string) (
-	oldPBlock, newPBlock *DirBlock, newDe DirEntry, lbc localBcache,
+	oldPBlock, newPBlock *DirBlock, newDe DirEntry, ro *renameOp,
 	err error) {
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
 
-	// look up in the old path
-	oldPBlock, err = fbo.getDirLocked(
-		ctx, lState, md, oldParent, blockWrite)
+	// Look up in the old path. Won't be modified, so only fetch for reading.
+	oldPBlock, err = fbo.getDirtyDirLocked(
+		ctx, lState, kmd, oldParent, blockRead)
 	if err != nil {
 		return nil, nil, DirEntry{}, nil, err
 	}
@@ -1570,7 +1558,7 @@ func (fbo *folderBlockOps) PrepRename(
 		return nil, nil, DirEntry{}, nil, NoSuchNameError{oldName}
 	}
 
-	ro, err := newRenameOp(oldName, oldParent.tailPointer(), newName,
+	ro, err = newRenameOp(oldName, oldParent.tailPointer(), newName,
 		newParent.tailPointer(), newDe.BlockPointer, newDe.Type)
 	if err != nil {
 		return nil, nil, DirEntry{}, nil, err
@@ -1580,46 +1568,19 @@ func (fbo *folderBlockOps) PrepRename(
 	// rename may force a manual paths population at other layers
 	// (e.g., for journal statuses).  TODO: allow a way to set more
 	// than one final path for renameOps?
-	md.AddOp(ro)
 
-	lbc = make(localBcache)
 	// TODO: Write a SameBlock() function that can deal properly with
 	// dedup'd blocks that share an ID but can be updated separately.
 	if oldParent.tailPointer().ID == newParent.tailPointer().ID {
 		newPBlock = oldPBlock
 	} else {
-		newPBlock, err = fbo.getDirLocked(
-			ctx, lState, md, newParent, blockWrite)
+		newPBlock, err = fbo.getDirtyDirLocked(
+			ctx, lState, kmd, newParent, blockRead)
 		if err != nil {
 			return nil, nil, DirEntry{}, nil, err
 		}
-		now := fbo.nowUnixNano()
-
-		oldGrandparent := *oldParent.parentPath()
-		if len(oldGrandparent.path) > 0 {
-			// Update the old parent's mtime/ctime, unless the
-			// oldGrandparent is the same as newParent (in which
-			// case, the syncBlockAndCheckEmbedLocked call by the
-			// caller will take care of it).
-			if oldGrandparent.tailPointer().ID != newParent.tailPointer().ID {
-				b, err := fbo.getDirLocked(ctx, lState, md, oldGrandparent, blockWrite)
-				if err != nil {
-					return nil, nil, DirEntry{}, nil, err
-				}
-				if de, ok := b.Children[oldParent.tailName()]; ok {
-					de.Ctime = now
-					de.Mtime = now
-					b.Children[oldParent.tailName()] = de
-					// Put this block back into the local cache as dirty
-					lbc[oldGrandparent.tailPointer()] = b
-				}
-			}
-		} else {
-			md.data.Dir.Ctime = now
-			md.data.Dir.Mtime = now
-		}
 	}
-	return oldPBlock, newPBlock, newDe, lbc, nil
+	return oldPBlock, newPBlock, newDe, ro, nil
 }
 
 func (fbo *folderBlockOps) newFileData(lState *lockState,

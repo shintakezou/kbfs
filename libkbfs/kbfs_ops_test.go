@@ -3416,63 +3416,20 @@ func TestKBFSOpsCreateSyncAll(t *testing.T) {
 	defer kbfsTestShutdownNoMocks(t, config, ctx, cancel)
 
 	// Manually create a file without actually syncing it.
-	// TODO(KBFS-2076) remove all this duplicated code.
 	rootNode := GetRootNodeOrBust(ctx, t, config, "alice,bob", false)
 
 	ops := getOps(config, rootNode.GetFolderBranch().Tlf)
 	name := "myfile"
-	var fileNode Node
-	{
-		rootDir := ops.nodeCache.PathFromNode(rootNode)
-		co, err := newCreateOp(name, rootDir.tailPointer(), File)
-		if err != nil {
-			t.Fatal(err)
-		}
-		newBlock := &FileBlock{}
 
-		newID, err := config.cryptoPure().MakeTemporaryBlockID()
-		if err != nil {
-			t.Fatal(err)
-		}
-		session, err := config.KBPKI().GetCurrentSession(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		newPtr := BlockPointer{
-			ID:         newID,
-			KeyGen:     1,
-			DataVer:    1,
-			DirectType: DirectBlock,
-			Context: kbfsblock.MakeFirstContext(
-				session.UID, keybase1.BlockType_DATA),
-		}
-		config.DirtyBlockCache().Put(ops.id(), newPtr, ops.branch(), newBlock)
-		co.AddRefBlock(newPtr)
-		fileNode, err = ops.nodeCache.GetOrCreate(newPtr, name, rootNode)
-		if err != nil {
-			t.Fatal(err)
-		}
-		de := DirEntry{
-			BlockInfo: BlockInfo{
-				BlockPointer: newPtr,
-				EncodedSize:  0,
-			},
-			EntryInfo: EntryInfo{
-				Type: File,
-				Size: 0,
-			},
-		}
-		lState := makeFBOLockState()
-		ops.blocks.AddDirEntryInCache(lState, rootDir, name, de)
-		ops.dirOps = append(
-			ops.dirOps, cachedDirOp{co, []Node{rootNode, fileNode}})
+	kbfsOps := config.KBFSOps()
+	fileNode, _, err := kbfsOps.CreateFile(ctx, rootNode, name, false, NoExcl)
+	if err != nil {
+		t.Fatalf("Couldn't create file: %+v", err)
 	}
 
 	// Write to A.
 	data := []byte{1}
-	kbfsOps := config.KBFSOps()
-	err := kbfsOps.Write(ctx, fileNode, data, 0)
+	err = kbfsOps.Write(ctx, fileNode, data, 0)
 	if err != nil {
 		t.Fatalf("Couldn't write to file: %+v", err)
 	}
@@ -3655,30 +3612,9 @@ func TestKBFSOpsSetExSyncAll(t *testing.T) {
 		t.Fatalf("Couldn't create file: %+v", err)
 	}
 
-	// Manually set the executability of a file without actually
-	// syncing it.  TODO(KBFS-2076) remove all this duplicated code.
-	ops := getOps(config, rootNode.GetFolderBranch().Tlf)
-	{
-		rootDir := ops.nodeCache.PathFromNode(rootNode)
-		filePath := ops.nodeCache.PathFromNode(fileNode)
-
-		sao, err := newSetAttrOp(name, rootDir.tailPointer(),
-			exAttr, filePath.tailPointer())
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		lState := makeFBOLockState()
-		dblock, err := ops.blocks.GetDirBlockForReading(
-			ctx, lState, ops.head, rootDir.tailPointer(), ops.branch(), rootDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		de := dblock.Children[name]
-		de.Type = Exec
-
-		_ = ops.blocks.SetAttrInDirEntryInCache(lState, filePath, de, sao.Attr)
-		ops.dirOps = append(ops.dirOps, cachedDirOp{sao, []Node{fileNode}})
+	err = kbfsOps.SetEx(ctx, fileNode, true)
+	if err != nil {
+		t.Fatalf("Couldn't create file: %+v", err)
 	}
 
 	// Make sure we can't see it before the sync happens.
@@ -3711,6 +3647,7 @@ func TestKBFSOpsSetExSyncAll(t *testing.T) {
 	rootNodeBob := GetRootNodeOrBust(ctx, t, config2, "alice,bob", false)
 	checkChild(config2, rootNodeBob)
 
+	ops := getOps(config, rootNode.GetFolderBranch().Tlf)
 	if len(ops.blocks.deCache) > 0 {
 		t.Fatalf("%d unexpected deCache entries leftover",
 			len(ops.blocks.deCache))
