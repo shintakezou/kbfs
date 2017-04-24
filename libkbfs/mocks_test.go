@@ -5091,9 +5091,9 @@ func (_mr *_MockConfigRecorder) SetBGFlushDirOpBatchSize(arg0 interface{}) *gomo
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "SetBGFlushDirOpBatchSize", arg0)
 }
 
-func (_m *MockConfig) BGFlushPeriod() int {
+func (_m *MockConfig) BGFlushPeriod() time.Duration {
 	ret := _m.ctrl.Call(_m, "BGFlushPeriod")
-	ret0, _ := ret[0].(int)
+	ret0, _ := ret[0].(time.Duration)
 	return ret0
 }
 
@@ -5101,8 +5101,8 @@ func (_mr *_MockConfigRecorder) BGFlushPeriod() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "BGFlushPeriod")
 }
 
-func (_m *MockConfig) SetBGFlushPeriod(s int) {
-	_m.ctrl.Call(_m, "SetBGFlushPeriod", s)
+func (_m *MockConfig) SetBGFlushPeriod(p time.Duration) {
+	_m.ctrl.Call(_m, "SetBGFlushPeriod", p)
 }
 
 func (_mr *_MockConfigRecorder) SetBGFlushPeriod(arg0 interface{}) *gomock.Call {

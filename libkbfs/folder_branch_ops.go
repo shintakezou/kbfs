@@ -5521,7 +5521,7 @@ func (fbo *folderBranchOps) backgroundFlusher() {
 			case <-fbo.syncNeededChan:
 				if fbo.getCachedDirOpsCount(lState) >=
 					fbo.config.BGFlushDirOpBatchSize() {
-					doWait = false
+					forced = true
 				}
 			case <-fbo.forceSyncChan:
 				doWait = false
