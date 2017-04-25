@@ -1318,6 +1318,17 @@ func (fbo *folderBlockOps) UpdateDirtyEntry(
 	return newDe
 }
 
+// UpdateDirtyEntry returns the possibly-dirty DirEntry of the given
+// file in its parent DirBlock. file doesn't need to have a valid
+// parent (i.e., it could be the root dir).
+func (fbo *folderBlockOps) UpdateDirtyEntry(
+	ctx context.Context, lState *lockState, de DirEntry) DirEntry {
+	fbo.blockLock.RLock(lState)
+	defer fbo.blockLock.RUnlock(lState)
+	_, newDe := fbo.updateDirtyEntryLocked(ctx, lState, de)
+	return newDe
+}
+
 // Lookup returns the possibly-dirty DirEntry of the given file in its
 // parent DirBlock, and a Node for the file if it exists.  It has to
 // do all of this under the block lock to avoid races with
