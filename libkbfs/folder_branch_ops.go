@@ -1726,7 +1726,9 @@ func (fbo *folderBranchOps) GetDirChildren(ctx context.Context, dir Node) (
 
 		if fbo.nodeCache.IsUnlinked(dir) {
 			fbo.log.CDebugf(ctx, "Returning an empty children set for "+
-				"unlinked directory %v", dirPath.tailPointer())
+				"unlinked directory %v (md root = %v vs. curr root = %v)",
+				dirPath.tailPointer(), md.data.Dir.BlockPointer,
+				dirPath.path[0].BlockPointer)
 			return nil
 		}
 
@@ -3704,9 +3706,17 @@ func (fbo *folderBranchOps) syncAllLocked(
 			// If the directory is empty, we need to explicitly clean
 			// up its entry after syncing.
 			ref = newPath.tailPointer().Ref()
+		case *rmOp:
+			realOp.AddUpdate(realOp.Dir.Unref, realOp.Dir.Unref)
+			continue
 		case *renameOp:
+			realOp.AddUpdate(realOp.OldDir.Unref, realOp.OldDir.Unref)
+			if realOp.NewDir != (blockUpdate{}) {
+				realOp.AddUpdate(realOp.NewDir.Unref, realOp.NewDir.Unref)
+			}
 			ref = realOp.Renamed.Ref()
 		case *setAttrOp:
+			realOp.AddUpdate(realOp.Dir.Unref, realOp.Dir.Unref)
 			ref = realOp.File.Ref()
 		default:
 			continue
