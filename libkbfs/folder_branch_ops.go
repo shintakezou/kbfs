@@ -1818,7 +1818,6 @@ func (fbo *folderBranchOps) statEntry(ctx context.Context, node Node) (
 		if err != nil {
 			return DirEntry{}, err
 		}
-
 	} else {
 		// nodePath is just the root.
 		de = md.data.Dir
@@ -3147,6 +3146,11 @@ func (fbo *folderBranchOps) renameLocked(
 		if err != nil {
 			return err
 		}
+	}
+
+	err = fbo.nodeCache.Move(newDe.Ref(), newParent, newName)
+	if err != nil {
+		return err
 	}
 
 	// Nothing below here can fail, so no need to clean up the dir
