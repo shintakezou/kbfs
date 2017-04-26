@@ -1222,8 +1222,8 @@ func (fbo *folderBranchOps) getSuccessorMDForWriteLockedForFilename(
 	}
 
 	// Make a new successor of the current MD to hold the coming
-	// writes.  The caller must pass this into
-	// syncBlockAndCheckEmbedLocked or the changes will be lost.
+	// writes.  The caller must pass this into `finalizeMDWriteLocked`
+	// or the changes will be lost.
 	return md.MakeSuccessor(ctx, fbo.config.MetadataVersion(),
 		fbo.config.Codec(), fbo.config.Crypto(),
 		fbo.config.KeyManager(), md.mdID, true)
@@ -1926,67 +1926,6 @@ func (bps *blockPutState) DeepCopy() *blockPutState {
 
 type localBcache map[BlockPointer]*DirBlock
 
-// syncBlockLock calls syncBlock under mdWriterLock.
-func (fbo *folderBranchOps) syncBlockLocked(
-	ctx context.Context, lState *lockState, uid keybase1.UID,
-	md *RootMetadata, newBlock Block, dir path, name string,
-	entryType EntryType, mtime bool, ctime bool, stopAt BlockPointer,
-	lbc localBcache) (path, DirEntry, *blockPutState, error) {
-	fbo.mdWriterLock.AssertLocked(lState)
-	return fbo.prepper.prepUpdateForPath(
-		ctx, lState, uid, md, newBlock, dir, name,
-		entryType, mtime, ctime, stopAt, lbc)
-}
-
-// syncBlockForConflictResolution calls syncBlock unlocked, since
-// conflict resolution can handle MD revision number conflicts
-// correctly.
-func (fbo *folderBranchOps) syncBlockForConflictResolution(
-	ctx context.Context, lState *lockState, uid keybase1.UID,
-	md *RootMetadata, newBlock Block, dir path, name string,
-	entryType EntryType, mtime bool, ctime bool, stopAt BlockPointer,
-	lbc localBcache) (path, DirEntry, *blockPutState, error) {
-	return fbo.prepper.prepUpdateForPath(
-		ctx, lState, uid, md, newBlock, dir,
-		name, entryType, mtime, ctime, stopAt, lbc)
-}
-
-// entryType must not be Sym.
-func (fbo *folderBranchOps) syncBlockAndCheckEmbedLocked(ctx context.Context,
-	lState *lockState, md *RootMetadata, newBlock Block, dir path,
-	name string, entryType EntryType, mtime bool, ctime bool,
-	stopAt BlockPointer, lbc localBcache) (
-	path, DirEntry, *blockPutState, error) {
-	fbo.mdWriterLock.AssertLocked(lState)
-
-	session, err := fbo.config.KBPKI().GetCurrentSession(ctx)
-	if err != nil {
-		return path{}, DirEntry{}, nil, err
-	}
-
-	newPath, newDe, bps, err := fbo.syncBlockLocked(
-		ctx, lState, session.UID, md, newBlock, dir, name, entryType,
-		mtime, ctime, stopAt, lbc)
-	if err != nil {
-		return path{}, DirEntry{}, nil, err
-	}
-
-	// Do the block changes need their own blocks?  Unembed only if
-	// this is the final call to this function with this MD.
-	if stopAt == zeroPtr {
-		bsplit := fbo.config.BlockSplitter()
-		if !bsplit.ShouldEmbedBlockChanges(&md.data.Changes) {
-			err = fbo.prepper.unembedBlockChanges(
-				ctx, bps, md, &md.data.Changes, session.UID)
-			if err != nil {
-				return path{}, DirEntry{}, nil, err
-			}
-		}
-	}
-
-	return newPath, newDe, bps, nil
-}
-
 // Returns whether the given error is one that shouldn't block the
 // removal of a file or directory.
 //
@@ -2365,38 +2304,6 @@ func (fbo *folderBranchOps) finalizeGCOp(ctx context.Context, gco *GCOp) (
 	}
 
 	return fbo.notifyBatchLocked(ctx, lState, irmd, nil)
-}
-
-func (fbo *folderBranchOps) syncBlockAndFinalizeLocked(ctx context.Context,
-	lState *lockState, md *RootMetadata, newBlock Block, dir path,
-	name string, entryType EntryType, mtime bool, ctime bool,
-	stopAt BlockPointer, excl Excl) (de DirEntry, err error) {
-	fbo.mdWriterLock.AssertLocked(lState)
-	_, de, bps, err := fbo.syncBlockAndCheckEmbedLocked(
-		ctx, lState, md, newBlock, dir, name, entryType, mtime,
-		ctime, zeroPtr, nil)
-	if err != nil {
-		return DirEntry{}, err
-	}
-
-	defer func() {
-		if err != nil {
-			fbo.fbm.cleanUpBlockState(
-				md.ReadOnly(), bps, blockDeleteOnMDFail)
-		}
-	}()
-
-	_, err = doBlockPuts(ctx, fbo.config.BlockServer(),
-		fbo.config.BlockCache(), fbo.config.Reporter(), fbo.log, md.TlfID(),
-		md.GetTlfHandle().GetCanonicalName(), *bps)
-	if err != nil {
-		return DirEntry{}, err
-	}
-	err = fbo.finalizeMDWriteLocked(ctx, lState, md, bps, excl, nil)
-	if err != nil {
-		return DirEntry{}, err
-	}
-	return de, nil
 }
 
 func checkDisallowedPrefixes(name string) error {
