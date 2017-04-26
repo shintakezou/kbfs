@@ -994,6 +994,30 @@ func (fbo *folderBlockOps) SetAttrInDirEntryInCache(lState *lockState,
 	return deleteTargetDirEntry
 }
 
+// ClearCachedAddsAndRemoves clears out any cached directory entry
+// adds and removes for the given dir.
+func (fbo *folderBlockOps) ClearCachedAdd(
+	lState *lockState, dir path, name string) {
+	fbo.blockLock.Lock(lState)
+	defer fbo.blockLock.Unlock(lState)
+	cacheEntry, ok := fbo.deCache[dir.tailPointer().Ref()]
+	if !ok {
+		return
+	}
+
+	delete(cacheEntry.adds, name)
+
+	// If the entry is totally empty, we can just delete it.
+	if !cacheEntry.dirEntry.IsInitialized() &&
+		cacheEntry.dirEntry.Mtime == 0 && cacheEntry.dirEntry.Ctime == 0 &&
+		len(cacheEntry.adds) == 0 && len(cacheEntry.dels) == 0 {
+		delete(fbo.deCache, dir.tailPointer().Ref())
+		return
+	}
+
+	fbo.deCache[dir.tailPointer().Ref()] = cacheEntry
+}
+
 // ClearCachedRef clears any info from the cache for the given block
 // reference, if it's not still dirty.  Returns false if the reference
 // wasn't cleared because it is still dirty.

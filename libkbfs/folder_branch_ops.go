@@ -2465,15 +2465,6 @@ func (fbo *folderBranchOps) createEntryLocked(
 		return nil, DirEntry{}, err
 	}
 
-	// Nothing below here can fail, so no need to clean up the dir
-	// entry cache on a failure.  If this ever panics, we need to add
-	// cleanup code.
-	defer func() {
-		if err != nil {
-			panic("Need cleanup code")
-		}
-	}()
-
 	now := fbo.nowUnixNano()
 	de := DirEntry{
 		BlockInfo: BlockInfo{
@@ -2489,6 +2480,23 @@ func (fbo *folderBranchOps) createEntryLocked(
 	}
 	fbo.blocks.AddDirEntryInCache(lState, dirPath, name, de)
 
+	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir, node}})
+	fbo.status.addDirtyNode(dir)
+	fbo.signalWrite()
+
+	cleanupFn := func() {
+		fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+		fbo.blocks.ClearCachedAdd(lState, dirPath, name)
+		fbo.blocks.ClearCacheInfo(lState, fbo.nodeCache.PathFromNode(node))
+		// Delete should never fail.
+		_ = fbo.config.DirtyBlockCache().Delete(fbo.id(), newPtr, fbo.branch())
+	}
+	defer func() {
+		if err != nil {
+			cleanupFn()
+		}
+	}()
+
 	if entryType != Dir {
 		// Dirty the file with a zero-byte write, to ensure the new
 		// block is synced in SyncAll.  TODO: remove this if we ever
@@ -2496,16 +2504,43 @@ func (fbo *folderBranchOps) createEntryLocked(
 		err = fbo.blocks.Write(
 			ctx, lState, md.ReadOnly(), node, []byte{}, 0)
 		if err != nil {
-			// This intentionally triggers the panic above -- it
-			// should never happen since all of the data is guaranteed
-			// to be local.
 			return nil, DirEntry{}, err
 		}
 	}
 
-	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir, node}})
-	fbo.status.addDirtyNode(dir)
-	fbo.signalWrite()
+	if excl == WithExcl {
+		// Sync this change to the server.
+		err := fbo.syncAllLocked(ctx, lState, WithExcl)
+		_, isNoUpdatesWhileDirty := errors.Cause(err).(NoUpdatesWhileDirtyError)
+		if isNoUpdatesWhileDirty {
+			// If an exclusive write hits a conflict, it will try to
+			// update, but won't be able to because of the dirty
+			// directory entries.  We need to clean up the dirty
+			// entries here first before trying to apply the updates
+			// again.  By returning `ExclOnUnmergedError` below, we
+			// force the caller to retry the whole operation again.
+			fbo.log.CDebugf(ctx, "Clearing dirty entry before applying new "+
+				"updates for exclusive write")
+			cleanupFn()
+
+			// Sync anything else that might be buffers (non-exclusively).
+			err = fbo.syncAllLocked(ctx, lState, NoExcl)
+			if err != nil {
+				return nil, DirEntry{}, err
+			}
+
+			// Now we should be in a clean state, so this should work.
+			err = fbo.getAndApplyMDUpdates(
+				ctx, lState, fbo.applyMDUpdatesLocked)
+			if err != nil {
+				return nil, DirEntry{}, err
+			}
+			return nil, DirEntry{}, ExclOnUnmergedError{}
+		} else if err != nil {
+			return nil, DirEntry{}, err
+		}
+	}
+
 	return node, de, nil
 }
 
@@ -3518,7 +3553,7 @@ func (fbo *folderBranchOps) startSyncLocked(ctx context.Context,
 }
 
 func (fbo *folderBranchOps) syncAllLocked(
-	ctx context.Context, lState *lockState) (err error) {
+	ctx context.Context, lState *lockState, excl Excl) (err error) {
 	fbo.mdWriterLock.AssertLocked(lState)
 
 	dirtyFiles := fbo.blocks.GetDirtyFileBlockRefs(lState)
@@ -3833,14 +3868,14 @@ func (fbo *folderBranchOps) syncAllLocked(
 	}
 
 	return fbo.finalizeMDWriteLocked(
-		ctx, lState, md, bps, NoExcl, afterUpdateFn)
+		ctx, lState, md, bps, excl, afterUpdateFn)
 }
 
 func (fbo *folderBranchOps) syncAllUnlocked(
 	ctx context.Context, lState *lockState) error {
 	fbo.mdWriterLock.Lock(lState)
 	defer fbo.mdWriterLock.Unlock(lState)
-	return fbo.syncAllLocked(ctx, lState)
+	return fbo.syncAllLocked(ctx, lState, NoExcl)
 }
 
 // SyncAll implements the KBFSOps interface for folderBranchOps.
@@ -3855,7 +3890,7 @@ func (fbo *folderBranchOps) SyncAll(
 
 	return fbo.doMDWriteWithRetryUnlessCanceled(ctx,
 		func(lState *lockState) error {
-			return fbo.syncAllLocked(ctx, lState)
+			return fbo.syncAllLocked(ctx, lState, NoExcl)
 		})
 }
 
@@ -4934,6 +4969,11 @@ func (fbo *folderBranchOps) SyncFromServerForTesting(
 	}
 
 	lState := makeFBOLockState()
+
+	// Make sure everything outstanding syncs to disk at least.
+	if err := fbo.syncAllUnlocked(ctx, lState); err != nil {
+		return err
+	}
 
 	// A journal flush before CR, if needed.
 	if err := WaitForTLFJournal(ctx, fbo.config, fbo.id(),
