@@ -3672,10 +3672,25 @@ func (fbo *folderBranchOps) syncAllLocked(
 	fileBlocks := make(fileBlockMap)
 	for _, op := range fbo.dirOps {
 		md.AddOp(op.dirOp)
+
+		// Add "updates" for all the nodes, so that all the parent
+		// directories end up as chains.
+		for _, n := range op.nodes {
+			p := fbo.nodeCache.PathFromNode(n)
+			for i, pn := range p.path {
+				if _, ok := op.dirOp.(*setAttrOp); ok && i == len(p.path)-1 {
+					// The setAttrOps have a File node, and the file
+					// BlockPointer doesn't actually change as part of
+					// a set attr.
+					continue
+				}
+				op.dirOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
+			}
+		}
+
 		var ref BlockRef
 		switch realOp := op.dirOp.(type) {
 		case *createOp:
-			realOp.AddUpdate(realOp.Dir.Unref, realOp.Dir.Unref)
 			if realOp.Type == Sym {
 				continue
 			}
@@ -3706,17 +3721,9 @@ func (fbo *folderBranchOps) syncAllLocked(
 			// If the directory is empty, we need to explicitly clean
 			// up its entry after syncing.
 			ref = newPath.tailPointer().Ref()
-		case *rmOp:
-			realOp.AddUpdate(realOp.Dir.Unref, realOp.Dir.Unref)
-			continue
 		case *renameOp:
-			realOp.AddUpdate(realOp.OldDir.Unref, realOp.OldDir.Unref)
-			if realOp.NewDir != (blockUpdate{}) {
-				realOp.AddUpdate(realOp.NewDir.Unref, realOp.NewDir.Unref)
-			}
 			ref = realOp.Renamed.Ref()
 		case *setAttrOp:
-			realOp.AddUpdate(realOp.Dir.Unref, realOp.Dir.Unref)
 			ref = realOp.File.Ref()
 		default:
 			continue
