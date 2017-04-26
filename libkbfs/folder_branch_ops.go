@@ -2456,6 +2456,9 @@ func (fbo *folderBranchOps) signalWrite() {
 	case fbo.syncNeededChan <- struct{}{}:
 	default:
 	}
+	// A local write always means any ongoing CR should be cancel,
+	// because the set of unmerged writes has changed.
+	fbo.cr.ForceCancel()
 }
 
 // entryType must not by Sym.
@@ -3924,6 +3927,13 @@ func (fbo *folderBranchOps) syncAllLocked(
 
 	return fbo.finalizeMDWriteLocked(
 		ctx, lState, md, bps, NoExcl, afterUpdateFn)
+}
+
+func (fbo *folderBranchOps) syncAllUnlocked(
+	ctx context.Context, lState *lockState) error {
+	fbo.mdWriterLock.Lock(lState)
+	defer fbo.mdWriterLock.Unlock(lState)
+	return fbo.syncAllLocked(ctx, lState)
 }
 
 // SyncAll implements the KBFSOps interface for folderBranchOps.
