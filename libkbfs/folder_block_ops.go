@@ -1006,11 +1006,13 @@ func (fbo *folderBlockOps) ClearCachedAdd(
 	}
 
 	delete(cacheEntry.adds, name)
+	delete(cacheEntry.addedSyms, name)
 
 	// If the entry is totally empty, we can just delete it.
 	if !cacheEntry.dirEntry.IsInitialized() &&
 		cacheEntry.dirEntry.Mtime == 0 && cacheEntry.dirEntry.Ctime == 0 &&
-		len(cacheEntry.adds) == 0 && len(cacheEntry.dels) == 0 {
+		len(cacheEntry.adds) == 0 && len(cacheEntry.dels) == 0 &&
+		len(cacheEntry.addedSyms) == 0 {
 		delete(fbo.deCache, dir.tailPointer().Ref())
 		return
 	}
