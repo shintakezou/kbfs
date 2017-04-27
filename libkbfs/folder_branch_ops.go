@@ -1726,9 +1726,7 @@ func (fbo *folderBranchOps) GetDirChildren(ctx context.Context, dir Node) (
 
 		if fbo.nodeCache.IsUnlinked(dir) {
 			fbo.log.CDebugf(ctx, "Returning an empty children set for "+
-				"unlinked directory %v (md root = %v vs. curr root = %v)",
-				dirPath.tailPointer(), md.data.Dir.BlockPointer,
-				dirPath.path[0].BlockPointer)
+				"unlinked directory %v", dirPath.tailPointer())
 			return nil
 		}
 
@@ -3305,7 +3303,8 @@ func (fbo *folderBranchOps) setExLocked(
 		return
 	}
 
-	de, err := fbo.blocks.GetDirtyEntry(ctx, lState, md.ReadOnly(), filePath)
+	de, err := fbo.blocks.GetDirtyEntryEvenIfDeleted(
+		ctx, lState, md.ReadOnly(), filePath)
 	if err != nil {
 		return err
 	}
@@ -3400,7 +3399,8 @@ func (fbo *folderBranchOps) setMtimeLocked(
 		return err
 	}
 
-	de, err := fbo.blocks.GetDirtyEntry(ctx, lState, md.ReadOnly(), filePath)
+	de, err := fbo.blocks.GetDirtyEntryEvenIfDeleted(
+		ctx, lState, md.ReadOnly(), filePath)
 	if err != nil {
 		return err
 	}

@@ -1295,8 +1295,7 @@ func (fbo *folderBlockOps) GetDirtyParentAndEntry(
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
 	return fbo.getDirtyParentAndEntryLocked(
-		ctx, lState, kmd, file, blockRead,
-		true /* TODO(KBFS-2076) make this false */)
+		ctx, lState, kmd, file, blockRead, false)
 }
 
 // file must have a valid parent.
@@ -1317,8 +1316,7 @@ func (fbo *folderBlockOps) GetDirtyEntry(
 	file path) (DirEntry, error) {
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
-	return fbo.getDirtyEntryLocked(ctx, lState, kmd, file,
-		true /* TODO(KBFS-2076) make this false */)
+	return fbo.getDirtyEntryLocked(ctx, lState, kmd, file, false)
 }
 
 // GetDirtyEntryEvenIfDeleted returns the possibly-dirty DirEntry of
@@ -1331,17 +1329,6 @@ func (fbo *folderBlockOps) GetDirtyEntryEvenIfDeleted(
 	fbo.blockLock.RLock(lState)
 	defer fbo.blockLock.RUnlock(lState)
 	return fbo.getDirtyEntryLocked(ctx, lState, kmd, file, true)
-}
-
-// UpdateDirtyEntry returns the possibly-dirty DirEntry of the given
-// file in its parent DirBlock. file doesn't need to have a valid
-// parent (i.e., it could be the root dir).
-func (fbo *folderBlockOps) UpdateDirtyEntry(
-	ctx context.Context, lState *lockState, de DirEntry) DirEntry {
-	fbo.blockLock.RLock(lState)
-	defer fbo.blockLock.RUnlock(lState)
-	_, newDe := fbo.updateDirtyEntryLocked(ctx, lState, de)
-	return newDe
 }
 
 // UpdateDirtyEntry returns the possibly-dirty DirEntry of the given
