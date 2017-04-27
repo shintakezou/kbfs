@@ -3624,9 +3624,13 @@ func (fbo *folderBranchOps) syncAllLocked(
 
 		// Add "updates" for all the nodes, so that all the parent
 		// directories end up as chains.
+		done := make(map[BlockPointer]bool)
 		for _, n := range op.nodes {
 			p := fbo.nodeCache.PathFromNode(n)
 			for i, pn := range p.path {
+				if done[pn.BlockPointer] {
+					continue
+				}
 				if _, ok := op.dirOp.(*setAttrOp); ok && i == len(p.path)-1 {
 					// The setAttrOps have a File node, and the file
 					// BlockPointer doesn't actually change as part of
@@ -3634,6 +3638,7 @@ func (fbo *folderBranchOps) syncAllLocked(
 					continue
 				}
 				op.dirOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
+				done[pn.BlockPointer] = true
 			}
 		}
 
