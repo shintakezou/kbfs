@@ -3619,26 +3619,28 @@ func (fbo *folderBranchOps) syncAllLocked(
 
 	newBlocks := make(map[BlockPointer]bool)
 	fileBlocks := make(fileBlockMap)
+	parentsToAddChainsFor := make(map[BlockPointer]bool)
 	for _, op := range fbo.dirOps {
 		md.AddOp(op.dirOp)
 
-		// Add "updates" for all the nodes, so that all the parent
-		// directories end up as chains.
-		done := make(map[BlockPointer]bool)
+		// Add "updates" for all the op updates, and make chains for
+		// the rest of the parent directories, so they're treated like
+		// updates during the prepping.
 		for _, n := range op.nodes {
 			p := fbo.nodeCache.PathFromNode(n)
+			if _, ok := op.dirOp.(*setAttrOp); ok {
+				// For a setattr, the node is the file, but that
+				// doesn't get updated, so use the current parent
+				// node.
+				p = *p.parentPath()
+			}
+
 			for i, pn := range p.path {
-				if done[pn.BlockPointer] {
-					continue
+				if i == len(p.path)-1 {
+					op.dirOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
+				} else {
+					parentsToAddChainsFor[pn.BlockPointer] = true
 				}
-				if _, ok := op.dirOp.(*setAttrOp); ok && i == len(p.path)-1 {
-					// The setAttrOps have a File node, and the file
-					// BlockPointer doesn't actually change as part of
-					// a set attr.
-					continue
-				}
-				op.dirOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
-				done[pn.BlockPointer] = true
 			}
 		}
 
@@ -3776,13 +3778,16 @@ func (fbo *folderBranchOps) syncAllLocked(
 			return err
 		})
 
-		// Make each of the ops "self-updates" before making chains
-		// (they will be updated later to have the correct block
-		// pointers).  Add an update for each element in the path, so
-		// that the chains below are created correctly.
+		// Add an "update" for all the file update, and make chains
+		// for the rest of the parent directories, so they're treated
+		// like updates during the prepping.
 		lastOp := md.Data().Changes.Ops[len(md.Data().Changes.Ops)-1]
-		for _, p := range file.path {
-			lastOp.AddUpdate(p.BlockPointer, p.BlockPointer)
+		for i, pn := range file.path {
+			if i == len(file.path)-1 {
+				lastOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
+			} else {
+				parentsToAddChainsFor[pn.BlockPointer] = true
+			}
 		}
 
 		// Update the combined local block cache with this file's
@@ -3814,6 +3819,10 @@ func (fbo *folderBranchOps) syncAllLocked(
 	if err != nil {
 		return err
 	}
+	for ptr := range parentsToAddChainsFor {
+		syncChains.addNoopChain(ptr)
+	}
+
 	// All originals never made it to the server, so don't unmerged
 	// them.
 	syncChains.doNotUnrefPointers = syncChains.createdOriginals
