@@ -17,6 +17,7 @@ import (
 	"github.com/keybase/client/go/logger"
 	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/kbfs/kbfsblock"
+	"github.com/keybase/kbfs/kbfscodec"
 	"github.com/keybase/kbfs/kbfscrypto"
 	"github.com/keybase/kbfs/kbfssync"
 	"github.com/keybase/kbfs/tlf"
@@ -3667,15 +3668,26 @@ func (fbo *folderBranchOps) syncAllLocked(
 	newBlocks := make(map[BlockPointer]bool)
 	fileBlocks := make(fileBlockMap)
 	parentsToAddChainsFor := make(map[BlockPointer]bool)
-	for _, op := range fbo.dirOps {
-		md.AddOp(op.dirOp)
+	for _, dop := range fbo.dirOps {
+		// Copy the op before modifying it, in case there's an error
+		// and we have to retry with the original ops.  TODO: make a
+		// better way of copying a single op.
+		ops := make(opsList, 1)
+		err := kbfscodec.Update(
+			fbo.config.Codec(), &ops, opsList([]op{dop.dirOp}))
+		if err != nil {
+			return err
+		}
+		newOp := ops[0]
+
+		md.AddOp(newOp)
 
 		// Add "updates" for all the op updates, and make chains for
 		// the rest of the parent directories, so they're treated like
 		// updates during the prepping.
-		for _, n := range op.nodes {
+		for _, n := range dop.nodes {
 			p := fbo.nodeCache.PathFromNode(n)
-			if _, ok := op.dirOp.(*setAttrOp); ok {
+			if _, ok := newOp.(*setAttrOp); ok {
 				// For a setattr, the node is the file, but that
 				// doesn't get updated, so use the current parent
 				// node.
@@ -3684,7 +3696,7 @@ func (fbo *folderBranchOps) syncAllLocked(
 
 			for i, pn := range p.path {
 				if i == len(p.path)-1 {
-					op.dirOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
+					newOp.AddUpdate(pn.BlockPointer, pn.BlockPointer)
 				} else {
 					parentsToAddChainsFor[pn.BlockPointer] = true
 				}
@@ -3692,7 +3704,7 @@ func (fbo *folderBranchOps) syncAllLocked(
 		}
 
 		var ref BlockRef
-		switch realOp := op.dirOp.(type) {
+		switch realOp := newOp.(type) {
 		case *createOp:
 			if realOp.Type == Sym {
 				continue
@@ -3702,7 +3714,7 @@ func (fbo *folderBranchOps) syncAllLocked(
 			// pointer-updating, because the sync process will turn
 			// them into simple refs and will forget about the local,
 			// temporary ID.
-			newNode := op.nodes[1]
+			newNode := dop.nodes[1]
 			newPath := fbo.nodeCache.PathFromNode(newNode)
 			newBlocks[newPath.tailPointer()] = true
 
