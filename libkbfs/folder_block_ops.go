@@ -1462,6 +1462,11 @@ func (fbo *folderBlockOps) GetDirtyDirBlockRefs(lState *lockState) []BlockRef {
 		// should only have a dirEntry in the cache if it's newly
 		// created.)
 		if !de.dirEntry.IsInitialized() || de.dirEntry.Type == Dir {
+			if len(de.adds) == 0 && len(de.dels) == 0 && len(de.addedSyms) == 0 {
+				// The directory entry for this dir is dirty, but the
+				// directory itself is not.
+				continue
+			}
 			dirtyRefs = append(dirtyRefs, ref)
 		}
 	}

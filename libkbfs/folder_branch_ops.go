@@ -3712,9 +3712,16 @@ func (fbo *folderBranchOps) syncAllLocked(
 
 			dblock, ok := lbc[newPath.tailPointer()]
 			if !ok {
-				return errors.Errorf(
-					"New directory %s/%v didn't have dirty dir block",
-					newPath.tailName(), newPath.tailPointer())
+				// New directories that aren't otherwise dirty need to
+				// be added to both the `lbc` and `resolvedPaths` so
+				// they are properly synced.
+				dblock, err = fbo.blocks.GetDirtyDir(
+					ctx, lState, md, newPath, blockWrite)
+				if err != nil {
+					return err
+				}
+				lbc[newPath.tailPointer()] = dblock
+				resolvedPaths[newPath.tailPointer()] = newPath
 			}
 
 			if len(dblock.Children) > 0 {
