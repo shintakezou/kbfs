@@ -1582,11 +1582,15 @@ func (fbo *folderBlockOps) PrepRename(
 		return nil, nil, DirEntry{}, nil, NoSuchNameError{oldName}
 	}
 
-	ro, err = newRenameOp(oldName, oldParent.tailPointer(), newName,
-		newParent.tailPointer(), newDe.BlockPointer, newDe.Type)
+	oldParentPtr := oldParent.tailPointer()
+	newParentPtr := newParent.tailPointer()
+	ro, err = newRenameOp(oldName, oldParentPtr, newName, newParentPtr,
+		newDe.BlockPointer, newDe.Type)
 	if err != nil {
 		return nil, nil, DirEntry{}, nil, err
 	}
+	ro.AddUpdate(oldParentPtr, oldParentPtr)
+
 	// A renameOp doesn't have a single path to represent it, so we
 	// can't call setFinalPath here unfortunately.  That means any
 	// rename may force a manual paths population at other layers
@@ -1595,7 +1599,7 @@ func (fbo *folderBlockOps) PrepRename(
 
 	// TODO: Write a SameBlock() function that can deal properly with
 	// dedup'd blocks that share an ID but can be updated separately.
-	if oldParent.tailPointer().ID == newParent.tailPointer().ID {
+	if oldParentPtr.ID == newParentPtr.ID {
 		newPBlock = oldPBlock
 	} else {
 		newPBlock, err = fbo.getDirtyDirLocked(
@@ -1603,6 +1607,7 @@ func (fbo *folderBlockOps) PrepRename(
 		if err != nil {
 			return nil, nil, DirEntry{}, nil, err
 		}
+		ro.AddUpdate(newParentPtr, newParentPtr)
 	}
 	return oldPBlock, newPBlock, newDe, ro, nil
 }

@@ -1978,8 +1978,8 @@ func isRevisionConflict(err error) bool {
 }
 
 func (fbo *folderBranchOps) finalizeMDWriteLocked(ctx context.Context,
-	lState *lockState, md *RootMetadata, bps *blockPutState, excl Excl,
-	afterUpdateFn func() error) (err error) {
+	lState *lockState, md *RootMetadata, bps *blockPutState, excl Excl) (
+	err error) {
 	fbo.mdWriterLock.AssertLocked(lState)
 
 	// finally, write out the new metadata
@@ -2111,11 +2111,6 @@ func (fbo *folderBranchOps) finalizeMDWriteLocked(ctx context.Context,
 	// Archive the old, unref'd blocks if journaling is off.
 	if !TLFJournalEnabled(fbo.config, fbo.id()) {
 		fbo.fbm.archiveUnrefBlocks(irmd.ReadOnly())
-	}
-
-	err = fbo.notifyBatchLocked(ctx, lState, irmd, afterUpdateFn)
-	if err != nil {
-		return err
 	}
 
 	// Call Resolve() after the head is set, to make sure it fetches
@@ -2301,7 +2296,7 @@ func (fbo *folderBranchOps) finalizeGCOp(ctx context.Context, gco *GCOp) (
 		return err
 	}
 
-	return fbo.notifyBatchLocked(ctx, lState, irmd, nil)
+	return fbo.notifyBatchLocked(ctx, lState, irmd)
 }
 
 func checkDisallowedPrefixes(name string) error {
@@ -2451,6 +2446,7 @@ func (fbo *folderBranchOps) createEntryLocked(
 			session.UID, keybase1.BlockType_DATA),
 	}
 	co.AddRefBlock(newPtr)
+	co.AddUpdate(parentPtr, parentPtr)
 
 	node, err := fbo.nodeCache.GetOrCreate(newPtr, name, dir)
 	if err != nil {
@@ -2537,6 +2533,11 @@ func (fbo *folderBranchOps) createEntryLocked(
 		} else if err != nil {
 			return nil, DirEntry{}, err
 		}
+	}
+
+	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
+	if err != nil {
+		return nil, DirEntry{}, err
 	}
 
 	return node, de, nil
@@ -2776,11 +2777,13 @@ func (fbo *folderBranchOps) createLinkLocked(
 		return DirEntry{}, err
 	}
 
-	co, err := newCreateOp(fromName, dirPath.tailPointer(), Sym)
+	parentPtr := dirPath.tailPointer()
+	co, err := newCreateOp(fromName, parentPtr, Sym)
 	if err != nil {
 		return DirEntry{}, err
 	}
 	co.setFinalPath(dirPath)
+	co.AddUpdate(parentPtr, parentPtr)
 
 	// Nothing below here can fail, so no need to clean up the dir
 	// entry cache on a failure.  If this ever panics, we need to add
@@ -2807,6 +2810,14 @@ func (fbo *folderBranchOps) createLinkLocked(
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir}})
 	fbo.status.addDirtyNode(dir)
 	fbo.signalWrite()
+
+	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
+	if err != nil {
+		// Inentionally trigger the panic above, since this should
+		// never happen.
+		return DirEntry{}, err
+	}
+
 	return de, nil
 }
 
@@ -2894,13 +2905,13 @@ func (fbo *folderBranchOps) unrefEntryLocked(ctx context.Context,
 }
 
 func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
-	lState *lockState, kmd KeyMetadata, dir Node, dirPath path,
+	lState *lockState, md ReadOnlyRootMetadata, dir Node, dirPath path,
 	name string) error {
 	fbo.mdWriterLock.AssertLocked(lState)
 
 	// We're not going to modify this copy of the dirblock, so just
 	// fetch it for reading.
-	pblock, err := fbo.blocks.GetDirtyDir(ctx, lState, kmd, dirPath, blockRead)
+	pblock, err := fbo.blocks.GetDirtyDir(ctx, lState, md, dirPath, blockRead)
 	if err != nil {
 		return err
 	}
@@ -2911,12 +2922,14 @@ func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
 		return NoSuchNameError{name}
 	}
 
-	ro, err := newRmOp(name, dirPath.tailPointer())
+	parentPtr := dirPath.tailPointer()
+	ro, err := newRmOp(name, parentPtr)
 	if err != nil {
 		return err
 	}
 	ro.setFinalPath(dirPath)
-	err = fbo.unrefEntryLocked(ctx, lState, kmd, ro, dirPath, de, name)
+	ro.AddUpdate(parentPtr, parentPtr)
+	err = fbo.unrefEntryLocked(ctx, lState, md, ro, dirPath, de, name)
 	if err != nil {
 		return err
 	}
@@ -2934,6 +2947,14 @@ func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{ro, []Node{dir}})
 	fbo.status.addDirtyNode(dir)
 	fbo.signalWrite()
+
+	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
+	if err != nil {
+		// Inentionally trigger the panic above, since this should
+		// never happen.
+		return err
+	}
+
 	return nil
 }
 
@@ -3119,6 +3140,14 @@ func (fbo *folderBranchOps) renameLocked(
 		fbo.status.addDirtyNode(n)
 	}
 	fbo.signalWrite()
+
+	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
+	if err != nil {
+		// Inentionally trigger the panic above, since this should
+		// never happen.
+		return err
+	}
+
 	return nil
 }
 
@@ -3330,12 +3359,13 @@ func (fbo *folderBranchOps) setExLocked(
 
 	de.Ctime = fbo.nowUnixNano()
 
-	parentPath := filePath.parentPath()
-	sao, err := newSetAttrOp(filePath.tailName(), parentPath.tailPointer(),
+	parentPtr := filePath.parentPath().tailPointer()
+	sao, err := newSetAttrOp(filePath.tailName(), parentPtr,
 		exAttr, filePath.tailPointer())
 	if err != nil {
 		return err
 	}
+	sao.AddUpdate(parentPtr, parentPtr)
 
 	// If the node has been unlinked, we can safely ignore this setex.
 	if fbo.nodeCache.IsUnlinked(file) {
@@ -3361,6 +3391,14 @@ func (fbo *folderBranchOps) setExLocked(
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
 	fbo.status.addDirtyNode(file)
 	fbo.signalWrite()
+
+	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
+	if err != nil {
+		// Inentionally trigger the panic above, since this should
+		// never happen.
+		return err
+	}
+
 	return nil
 }
 
@@ -3408,12 +3446,13 @@ func (fbo *folderBranchOps) setMtimeLocked(
 	// setting the mtime counts as changing the file MD, so must set ctime too
 	de.Ctime = fbo.nowUnixNano()
 
-	parentPath := filePath.parentPath()
-	sao, err := newSetAttrOp(filePath.tailName(), parentPath.tailPointer(),
+	parentPtr := filePath.parentPath().tailPointer()
+	sao, err := newSetAttrOp(filePath.tailName(), parentPtr,
 		mtimeAttr, filePath.tailPointer())
 	if err != nil {
 		return err
 	}
+	sao.AddUpdate(parentPtr, parentPtr)
 
 	// If the node has been unlinked, we can safely ignore this
 	// setmtime.
@@ -3440,6 +3479,14 @@ func (fbo *folderBranchOps) setMtimeLocked(
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
 	fbo.status.addDirtyNode(file)
 	fbo.signalWrite()
+
+	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
+	if err != nil {
+		// Inentionally trigger the panic above, since this should
+		// never happen.
+		return err
+	}
+
 	return nil
 }
 
@@ -3881,8 +3928,22 @@ func (fbo *folderBranchOps) syncAllLocked(
 		return nil
 	}
 
-	return fbo.finalizeMDWriteLocked(
-		ctx, lState, md, bps, excl, afterUpdateFn)
+	err = fbo.finalizeMDWriteLocked(ctx, lState, md, bps, excl)
+	if err != nil {
+		return err
+	}
+
+	// Just update the pointers using the resolutionOp, all the ops
+	// have already been notified.
+	err = fbo.blocks.UpdatePointers(
+		md, lState, md.data.Changes.Ops[0], false, afterUpdateFn)
+	if err != nil {
+		return err
+	}
+
+	irmd, _ := fbo.getHead(lState)
+	fbo.editHistory.UpdateHistory(ctx, []ImmutableRootMetadata{irmd})
+	return nil
 }
 
 func (fbo *folderBranchOps) syncAllUnlocked(
@@ -3946,38 +4007,13 @@ func (fbo *folderBranchOps) UnregisterFromChanges(obs Observer) error {
 
 // notifyBatchLocked sends out a notification for all the ops in md.
 func (fbo *folderBranchOps) notifyBatchLocked(
-	ctx context.Context, lState *lockState, md ImmutableRootMetadata,
-	afterUpdateFn func() error) error {
+	ctx context.Context, lState *lockState, md ImmutableRootMetadata) error {
 	fbo.headLock.AssertLocked(lState)
 
-	switch len(md.data.Changes.Ops) {
-	case 0:
-		panic("Unexpected empty ops change list in notifyBatchLocked")
-	case 1:
-		err := fbo.notifyOneOpLocked(
-			ctx, lState, md.data.Changes.Ops[0], md, false, afterUpdateFn)
+	for _, op := range md.data.Changes.Ops {
+		err := fbo.notifyOneOpLocked(ctx, lState, op, md.ReadOnly(), false)
 		if err != nil {
 			return err
-		}
-	default:
-		// In a multi-update batch, the first op should be the
-		// resolution op with all the new pointer updates.  It's the
-		// one that gets the afterUpdateFn.
-		if md.data.Changes.Ops[0].(*resolutionOp) == nil {
-			return errors.Errorf("First update in local batch is not a "+
-				"resolutionOp: %T", md.data.Changes.Ops[0])
-		}
-		err := fbo.notifyOneOpLocked(
-			ctx, lState, md.data.Changes.Ops[0], md, false, afterUpdateFn)
-		if err != nil {
-			return err
-		}
-		for i := 1; i < len(md.data.Changes.Ops); i++ {
-			err := fbo.notifyOneOpLocked(
-				ctx, lState, md.data.Changes.Ops[i], md, false, nil)
-			if err != nil {
-				return err
-			}
 		}
 	}
 	fbo.editHistory.UpdateHistory(ctx, []ImmutableRootMetadata{md})
@@ -4104,8 +4140,9 @@ func (fbo *folderBranchOps) getUnlinkPathBeforeUpdatingPointers(
 }
 
 func (fbo *folderBranchOps) notifyOneOpLocked(ctx context.Context,
-	lState *lockState, op op, md ImmutableRootMetadata, shouldPrefetch bool,
-	afterUpdateFn func() error) error {
+	lState *lockState, op op, md ReadOnlyRootMetadata,
+	shouldPrefetch bool) error {
+	fbo.mdWriterLock.AssertLocked(lState)
 	fbo.headLock.AssertLocked(lState)
 
 	if fbo.config.Mode() == InitMinimal {
@@ -4122,8 +4159,7 @@ func (fbo *folderBranchOps) notifyOneOpLocked(ctx context.Context,
 		return err
 	}
 
-	err = fbo.blocks.UpdatePointers(
-		md, lState, op, shouldPrefetch, afterUpdateFn)
+	err = fbo.blocks.UpdatePointers(md, lState, op, shouldPrefetch, nil)
 	if err != nil {
 		return err
 	}
@@ -4203,7 +4239,7 @@ func (fbo *folderBranchOps) notifyOneOpLocked(ctx context.Context,
 					// the updates.
 					var err error
 					newNode, err =
-						fbo.searchForNode(ctx, realOp.NewDir.Ref, md.ReadOnly())
+						fbo.searchForNode(ctx, realOp.NewDir.Ref, md)
 					if newNode == nil {
 						fbo.log.CErrorf(ctx, "Couldn't find the new node: %v",
 							err)
@@ -4249,7 +4285,7 @@ func (fbo *folderBranchOps) notifyOneOpLocked(ctx context.Context,
 		}
 
 		childNode, err := fbo.blocks.UpdateCachedEntryAttributes(
-			ctx, lState, md.ReadOnly(), p, realOp)
+			ctx, lState, md, p, realOp)
 		if err != nil {
 			return err
 		}
@@ -4338,6 +4374,14 @@ func (fbo *folderBranchOps) notifyOneOpLocked(ctx context.Context,
 
 	fbo.observers.batchChanges(ctx, changes)
 	return nil
+}
+
+func (fbo *folderBranchOps) notifyOneOp(ctx context.Context,
+	lState *lockState, op op, md ReadOnlyRootMetadata,
+	shouldPrefetch bool) error {
+	fbo.headLock.Lock(lState)
+	defer fbo.headLock.Unlock(lState)
+	return fbo.notifyOneOpLocked(ctx, lState, op, md, shouldPrefetch)
 }
 
 func (fbo *folderBranchOps) getCurrMDRevisionLocked(lState *lockState) MetadataRevision {
@@ -4449,7 +4493,7 @@ func (fbo *folderBranchOps) applyMDUpdatesLocked(ctx context.Context,
 			continue
 		}
 		for _, op := range rmd.data.Changes.Ops {
-			err := fbo.notifyOneOpLocked(ctx, lState, op, rmd, true, nil)
+			err := fbo.notifyOneOpLocked(ctx, lState, op, rmd.ReadOnly(), true)
 			if err != nil {
 				return err
 			}
@@ -4515,7 +4559,7 @@ func (fbo *folderBranchOps) undoMDUpdatesLocked(ctx context.Context,
 					err, ops[j])
 				continue
 			}
-			err = fbo.notifyOneOpLocked(ctx, lState, io, rmd, false, nil)
+			err = fbo.notifyOneOpLocked(ctx, lState, io, rmd.ReadOnly(), false)
 			if err != nil {
 				return err
 			}
@@ -4607,7 +4651,7 @@ func (fbo *folderBranchOps) getAndApplyNewestUnmergedHead(ctx context.Context,
 	if err := fbo.setHeadSuccessorLocked(ctx, lState, md, false); err != nil {
 		return err
 	}
-	if err := fbo.notifyBatchLocked(ctx, lState, md, nil); err != nil {
+	if err := fbo.notifyBatchLocked(ctx, lState, md); err != nil {
 		return err
 	}
 	if err := fbo.config.MDCache().Put(md); err != nil {
@@ -4749,7 +4793,13 @@ func (fbo *folderBranchOps) unstageLocked(ctx context.Context,
 		return err
 	}
 
-	return fbo.finalizeMDWriteLocked(ctx, lState, md, bps, NoExcl, nil)
+	err = fbo.finalizeMDWriteLocked(ctx, lState, md, bps, NoExcl)
+	if err != nil {
+		return err
+	}
+
+	irmd, _ := fbo.getHead(lState)
+	return fbo.notifyBatchLocked(ctx, lState, irmd)
 }
 
 // TODO: remove once we have automatic conflict resolution
@@ -5639,7 +5689,7 @@ func (fbo *folderBranchOps) finalizeResolutionLocked(ctx context.Context,
 	// notifyOneOp for every fixed-up merged op.
 	for _, op := range newOps {
 		err := fbo.notifyOneOpLocked(
-			ctx, lState, op, irmdCopyWithLocalOps, false, nil)
+			ctx, lState, op, irmdCopyWithLocalOps.ReadOnly(), false)
 		if err != nil {
 			return err
 		}
