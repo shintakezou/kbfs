@@ -3115,7 +3115,20 @@ func (fbo *folderBlockOps) UpdateCachedEntryAttributes(
 		return nil, nil
 	}
 
-	childPath = dir.ChildPath(op.Name, de.BlockPointer)
+	// If the name of this child is being added to the parent, then
+	// either the attribute was already updated or this is locally a
+	// brand new child, and there's no reason to update the attribute
+	// again.
+	addedToParent := func() bool {
+		fbo.blockLock.Lock(lState)
+		defer fbo.blockLock.Unlock(lState)
+		de := fbo.deCache[dir.tailPointer().Ref()]
+		_, ok := de.adds[op.Name]
+		return ok
+	}()
+	if addedToParent {
+		return childNode, nil
+	}
 
 	// If there's a cache entry, we need to update it, so try and
 	// fetch the undirtied entry.
