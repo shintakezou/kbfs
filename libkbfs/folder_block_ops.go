@@ -893,6 +893,14 @@ func (fbo *folderBlockOps) removeDirEntryInCacheLocked(lState *lockState,
 	cacheEntry.dirEntry.Ctime = now
 
 	fbo.deCache[dir.tailPointer().Ref()] = cacheEntry
+
+	// If the removed target is a directory, we can delete the cache
+	// entry for it as well, since there won't be any open handles to
+	// it.  We don't want this to show up as a dirty dir during
+	// syncing later.
+	if oldDe.Type == Dir {
+		delete(fbo.deCache, oldDe.Ref())
+	}
 }
 
 // RemoveDirEntryInCache removes an entry from the given directory in
