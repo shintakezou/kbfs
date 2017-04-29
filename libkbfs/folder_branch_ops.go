@@ -2365,7 +2365,7 @@ func (fbo *folderBranchOps) signalWrite() {
 // entryType must not by Sym.
 func (fbo *folderBranchOps) createEntryLocked(
 	ctx context.Context, lState *lockState, dir Node, name string,
-	entryType EntryType, excl Excl) (Node, DirEntry, error) {
+	entryType EntryType, excl Excl) (childNode Node, de DirEntry, err error) {
 	fbo.mdWriterLock.AssertLocked(lState)
 
 	if err := checkDisallowedPrefixes(name); err != nil {
@@ -2461,7 +2461,7 @@ func (fbo *folderBranchOps) createEntryLocked(
 	}
 
 	now := fbo.nowUnixNano()
-	de := DirEntry{
+	de = DirEntry{
 		BlockInfo: BlockInfo{
 			BlockPointer: newPtr,
 			EncodedSize:  0,
@@ -2517,8 +2517,9 @@ func (fbo *folderBranchOps) createEntryLocked(
 			fbo.log.CDebugf(ctx, "Clearing dirty entry before applying new "+
 				"updates for exclusive write")
 			cleanupFn()
+			cleanupFn = func() {}
 
-			// Sync anything else that might be buffers (non-exclusively).
+			// Sync anything else that might be buffered (non-exclusively).
 			err = fbo.syncAllLocked(ctx, lState, NoExcl)
 			if err != nil {
 				return nil, DirEntry{}, err
