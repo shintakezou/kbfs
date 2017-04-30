@@ -1979,7 +1979,8 @@ func isRevisionConflict(err error) bool {
 }
 
 func (fbo *folderBranchOps) finalizeMDWriteLocked(ctx context.Context,
-	lState *lockState, md *RootMetadata, bps *blockPutState, excl Excl) (
+	lState *lockState, md *RootMetadata, bps *blockPutState, excl Excl,
+	notifyFn func(ImmutableRootMetadata) error) (
 	err error) {
 	fbo.mdWriterLock.AssertLocked(lState)
 
@@ -2118,6 +2119,13 @@ func (fbo *folderBranchOps) finalizeMDWriteLocked(ctx context.Context,
 	// the correct unmerged MD range during resolution.
 	if doResolve {
 		fbo.cr.Resolve(ctx, md.Revision(), resolveMergedRev)
+	}
+
+	if notifyFn != nil {
+		err := notifyFn(irmd)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -3948,22 +3956,19 @@ func (fbo *folderBranchOps) syncAllLocked(
 		return nil
 	}
 
-	err = fbo.finalizeMDWriteLocked(ctx, lState, md, bps, excl)
-	if err != nil {
-		return err
-	}
+	return fbo.finalizeMDWriteLocked(ctx, lState, md, bps, excl,
+		func(md ImmutableRootMetadata) error {
+			// Just update the pointers using the resolutionOp, all
+			// the ops have already been notified.
+			err = fbo.blocks.UpdatePointers(
+				md, lState, md.data.Changes.Ops[0], false, afterUpdateFn)
+			if err != nil {
+				return err
+			}
 
-	// Just update the pointers using the resolutionOp, all the ops
-	// have already been notified.
-	err = fbo.blocks.UpdatePointers(
-		md, lState, md.data.Changes.Ops[0], false, afterUpdateFn)
-	if err != nil {
-		return err
-	}
-
-	irmd, _ := fbo.getHead(lState)
-	fbo.editHistory.UpdateHistory(ctx, []ImmutableRootMetadata{irmd})
-	return nil
+			fbo.editHistory.UpdateHistory(ctx, []ImmutableRootMetadata{md})
+			return nil
+		})
 }
 
 func (fbo *folderBranchOps) syncAllUnlocked(
@@ -4813,13 +4818,10 @@ func (fbo *folderBranchOps) unstageLocked(ctx context.Context,
 		return err
 	}
 
-	err = fbo.finalizeMDWriteLocked(ctx, lState, md, bps, NoExcl)
-	if err != nil {
-		return err
-	}
-
-	irmd, _ := fbo.getHead(lState)
-	return fbo.notifyBatchLocked(ctx, lState, irmd)
+	return fbo.finalizeMDWriteLocked(ctx, lState, md, bps, NoExcl,
+		func(md ImmutableRootMetadata) error {
+			return fbo.notifyBatchLocked(ctx, lState, md)
+		})
 }
 
 // TODO: remove once we have automatic conflict resolution
