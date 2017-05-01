@@ -2089,9 +2089,10 @@ func TestKBFSOpsConcurCanceledSyncFailsAfterCanceledSyncSucceeds(t *testing.T) {
 	cancel()
 	close(unmergedPutUnstallCh)
 
-	// We expect a canceled error
+	// We expect a canceled error, or possibly a nil error since we
+	// ignore the PutUnmerged error internally.
 	err = <-errChan
-	if err != context.Canceled {
+	if err != context.Canceled && err != nil {
 		t.Fatalf("No expected canceled error: %v", err)
 	}
 

@@ -901,13 +901,15 @@ func TestCRDouble(t *testing.T) {
 	// Cancel this revision after the Put happens, to force the
 	// background block manager to try to clean up.
 	onSyncStalledCh, syncUnstallCh, syncCtx := StallMDOp(
-		syncCtx, config2, StallableMDPutUnmerged, 1)
+		syncCtx, config2, StallableMDAfterPutUnmerged, 1)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		err = kbfsOps2.SyncAll(syncCtx, fileNodeC.GetFolderBranch())
-		assert.Equal(t, context.Canceled, err)
+		if err != nil {
+			assert.Equal(t, context.Canceled, err)
+		}
 	}()
 	<-onSyncStalledCh
 	cancel()
@@ -1698,7 +1700,12 @@ func TestUnmergedPutAfterCanceledUnmergedPut(t *testing.T) {
 		_, _, err = kbfsOps2.CreateFile(putCtx, rootNode2, "c", false, NoExcl)
 		require.NoError(t, err)
 		err = kbfsOps2.SyncAll(putCtx, rootNode2.GetFolderBranch())
-		assert.Error(t, err)
+		// Even though internally folderBranchOps ignores the
+		// cancellation error when putting on an unmerged branch, the
+		// wrapper function *might* still return it.
+		if err != nil {
+			assert.Equal(t, context.Canceled, err)
+		}
 	}()
 	<-onPutStalledCh
 	cancel2()

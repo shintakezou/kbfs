@@ -2067,10 +2067,30 @@ func (fbo *folderBranchOps) finalizeMDWriteLocked(ctx context.Context,
 		mdID, err = mdops.PutUnmerged(ctx, md)
 		if isRevisionConflict(err) {
 			// Self-conflicts are retried in `doMDWriteWithRetry`.
-			err = UnmergedSelfConflictError{err}
-		}
-		if err != nil {
-			return err
+			return UnmergedSelfConflictError{err}
+		} else if err != nil {
+			// If a PutUnmerged fails, we are in a bad situation: if
+			// we fail, but the put succeeded, then dirty data will
+			// remain cached locally and will be re-tried
+			// (non-idempotently) on the next sync call.  This should
+			// be a very rare situation when journaling is enabled, so
+			// instead let's pretend it succeeded so that the cached
+			// data is cleared and the nodeCache is updated.  If we're
+			// wrong, and the update didn't make it to the server,
+			// then the next call will get an
+			// UnmergedSelfConflictError but fail to find any new
+			// updates and fail the operation, but things will get
+			// fixed up once conflict resolution finally completes.
+			//
+			// TODO: how confused will the kernel cache get if the
+			// pointers are updated but the file system operation
+			// still gets an error returned by the wrapper function
+			// that calls us (in the event of a user cancellation).
+			fbo.log.CInfof(ctx, "Ignoring a PutUnmerged error: %+v", err)
+			mdID, err = fbo.config.cryptoPure().MakeMdID(md.bareMd)
+			if err != nil {
+				return err
+			}
 		}
 		bid := md.BID()
 		fbo.setBranchIDLocked(lState, bid)
@@ -2635,6 +2655,10 @@ func (fbo *folderBranchOps) doMDWriteWithRetry(ctx context.Context,
 					"(%v); forcing a sync", err)
 				err = fbo.getAndApplyNewestUnmergedHead(newCtx, lState)
 				if err != nil {
+					// TODO: we might be stuck at this point if we're
+					// ahead of the unmerged branch on the server, in
+					// which case we might want to just abandon any
+					// cached updates and force a sync to the head.
 					return err
 				}
 				cancel()
