@@ -958,7 +958,7 @@ func (fbo *folderBlockOps) setCachedAttrLocked(
 	doCreate bool) {
 	fbo.blockLock.AssertLocked(lState)
 	fileEntry, ok := fbo.deCache[ref]
-	if !ok {
+	if !ok || !fileEntry.dirEntry.IsInitialized() {
 		if !doCreate {
 			return
 		}
