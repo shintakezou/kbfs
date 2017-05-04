@@ -2390,6 +2390,15 @@ func (fbo *folderBranchOps) signalWrite() {
 	fbo.cr.ForceCancel()
 }
 
+func (fbo *folderBranchOps) syncDirUpdateOrSignal(
+	ctx context.Context, lState *lockState) error {
+	if fbo.config.BGFlushDirOpBatchSize() == 1 {
+		return fbo.syncAllLocked(ctx, lState, NoExcl)
+	}
+	fbo.signalWrite()
+	return nil
+}
+
 // entryType must not by Sym.
 func (fbo *folderBranchOps) createEntryLocked(
 	ctx context.Context, lState *lockState, dir Node, name string,
@@ -2505,7 +2514,6 @@ func (fbo *folderBranchOps) createEntryLocked(
 
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir, node}})
 	added := fbo.status.addDirtyNode(dir)
-	fbo.signalWrite()
 
 	cleanupFn := func() {
 		if added {
@@ -2531,10 +2539,19 @@ func (fbo *folderBranchOps) createEntryLocked(
 		if err != nil {
 			return nil, DirEntry{}, err
 		}
+		oldCleanupFn := cleanupFn
 		cleanupFn = func() {
 			fbo.blocks.ClearCacheInfo(lState, fbo.nodeCache.PathFromNode(node))
-			cleanupFn()
+			oldCleanupFn()
 		}
+	}
+
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
+	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
+	if err != nil {
+		return nil, DirEntry{}, err
 	}
 
 	if excl == WithExcl {
@@ -2569,11 +2586,11 @@ func (fbo *folderBranchOps) createEntryLocked(
 		} else if err != nil {
 			return nil, DirEntry{}, err
 		}
-	}
-
-	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
-	if err != nil {
-		return nil, DirEntry{}, err
+	} else {
+		err = fbo.syncDirUpdateOrSignal(ctx, lState)
+		if err != nil {
+			return nil, DirEntry{}, err
+		}
 	}
 
 	return node, de, nil
@@ -2856,9 +2873,15 @@ func (fbo *folderBranchOps) createLinkLocked(
 		}
 	}()
 
-	fbo.signalWrite()
-
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
 	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
+	if err != nil {
+		return DirEntry{}, err
+	}
+
+	err = fbo.syncDirUpdateOrSignal(ctx, lState)
 	if err != nil {
 		return DirEntry{}, err
 	}
@@ -2983,7 +3006,6 @@ func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
 		lState, dirPath, name, de)
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{ro, []Node{dir}})
 	added := fbo.status.addDirtyNode(dir)
-	fbo.signalWrite()
 
 	defer func() {
 		if err != nil {
@@ -2995,12 +3017,15 @@ func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
 		}
 	}()
 
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
 	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return fbo.syncDirUpdateOrSignal(ctx, lState)
 }
 
 func (fbo *folderBranchOps) removeDirLocked(ctx context.Context,
@@ -3179,7 +3204,6 @@ func (fbo *folderBranchOps) renameLocked(
 			addedNodes = append(addedNodes, n)
 		}
 	}
-	fbo.signalWrite()
 
 	defer func() {
 		if err != nil {
@@ -3191,12 +3215,15 @@ func (fbo *folderBranchOps) renameLocked(
 		}
 	}()
 
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
 	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return fbo.syncDirUpdateOrSignal(ctx, lState)
 }
 
 func (fbo *folderBranchOps) Rename(
@@ -3430,7 +3457,6 @@ func (fbo *folderBranchOps) setExLocked(
 		lState, filePath, de, sao.Attr)
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
 	added := fbo.status.addDirtyNode(file)
-	fbo.signalWrite()
 
 	defer func() {
 		if err != nil {
@@ -3442,12 +3468,15 @@ func (fbo *folderBranchOps) setExLocked(
 		}
 	}()
 
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
 	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return fbo.syncDirUpdateOrSignal(ctx, lState)
 }
 
 func (fbo *folderBranchOps) SetEx(
@@ -3518,7 +3547,6 @@ func (fbo *folderBranchOps) setMtimeLocked(
 		lState, filePath, de, sao.Attr)
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
 	added := fbo.status.addDirtyNode(file)
-	fbo.signalWrite()
 
 	defer func() {
 		if err != nil {
@@ -3530,12 +3558,15 @@ func (fbo *folderBranchOps) setMtimeLocked(
 		}
 	}()
 
+	// It's safe to notify before we've synced, since it is only
+	// sending inavlidation notifications.  At worst the upper layer
+	// will just have to refresh its cache needlessly.
 	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	return fbo.syncDirUpdateOrSignal(ctx, lState)
 }
 
 func (fbo *folderBranchOps) SetMtime(
