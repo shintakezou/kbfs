@@ -2501,16 +2501,18 @@ func (fbo *folderBranchOps) createEntryLocked(
 			Ctime: now,
 		},
 	}
-	fbo.blocks.AddDirEntryInCache(lState, dirPath, name, de)
+	dirCacheUndoFn := fbo.blocks.AddDirEntryInCache(lState, dirPath, name, de)
 
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir, node}})
-	fbo.status.addDirtyNode(dir)
+	added := fbo.status.addDirtyNode(dir)
 	fbo.signalWrite()
 
 	cleanupFn := func() {
+		if added {
+			fbo.status.rmDirtyNode(dir)
+		}
 		fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
-		fbo.blocks.ClearCachedAdd(lState, dirPath, name)
-		fbo.blocks.ClearCacheInfo(lState, fbo.nodeCache.PathFromNode(node))
+		dirCacheUndoFn(lState)
 		// Delete should never fail.
 		_ = fbo.config.DirtyBlockCache().Delete(fbo.id(), newPtr, fbo.branch())
 	}
@@ -2528,6 +2530,10 @@ func (fbo *folderBranchOps) createEntryLocked(
 			ctx, lState, md.ReadOnly(), node, []byte{}, 0)
 		if err != nil {
 			return nil, DirEntry{}, err
+		}
+		cleanupFn = func() {
+			fbo.blocks.ClearCacheInfo(lState, fbo.nodeCache.PathFromNode(node))
+			cleanupFn()
 		}
 	}
 
@@ -2822,11 +2828,6 @@ func (fbo *folderBranchOps) createLinkLocked(
 	// Nothing below here can fail, so no need to clean up the dir
 	// entry cache on a failure.  If this ever panics, we need to add
 	// cleanup code.
-	defer func() {
-		if err != nil {
-			panic("Need cleanup code")
-		}
-	}()
 
 	// Create a direntry for the link, and then sync
 	now := fbo.nowUnixNano()
@@ -2840,15 +2841,25 @@ func (fbo *folderBranchOps) createLinkLocked(
 		},
 	}
 
-	fbo.blocks.AddDirEntryInCache(lState, dirPath, fromName, de)
+	dirCacheUndoFn := fbo.blocks.AddDirEntryInCache(
+		lState, dirPath, fromName, de)
 	fbo.dirOps = append(fbo.dirOps, cachedDirOp{co, []Node{dir}})
-	fbo.status.addDirtyNode(dir)
+	added := fbo.status.addDirtyNode(dir)
+
+	defer func() {
+		if err != nil {
+			if added {
+				fbo.status.rmDirtyNode(dir)
+			}
+			fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+			dirCacheUndoFn(lState)
+		}
+	}()
+
 	fbo.signalWrite()
 
 	err = fbo.notifyOneOp(ctx, lState, co, md.ReadOnly(), false)
 	if err != nil {
-		// Inentionally trigger the panic above, since this should
-		// never happen.
 		return DirEntry{}, err
 	}
 
@@ -2968,24 +2979,24 @@ func (fbo *folderBranchOps) removeEntryLocked(ctx context.Context,
 		return err
 	}
 
-	// Nothing below here can fail, so no need to clean up the dir
-	// entry cache on a failure.  If this ever panics, we need to add
-	// cleanup code.
+	dirCacheUndoFn := fbo.blocks.RemoveDirEntryInCache(
+		lState, dirPath, name, de)
+	fbo.dirOps = append(fbo.dirOps, cachedDirOp{ro, []Node{dir}})
+	added := fbo.status.addDirtyNode(dir)
+	fbo.signalWrite()
+
 	defer func() {
 		if err != nil {
-			panic("Need cleanup code")
+			if added {
+				fbo.status.rmDirtyNode(dir)
+			}
+			fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+			dirCacheUndoFn(lState)
 		}
 	}()
 
-	fbo.blocks.RemoveDirEntryInCache(lState, dirPath, name, de)
-	fbo.dirOps = append(fbo.dirOps, cachedDirOp{ro, []Node{dir}})
-	fbo.status.addDirtyNode(dir)
-	fbo.signalWrite()
-
 	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
 	if err != nil {
-		// Inentionally trigger the panic above, since this should
-		// never happen.
 		return err
 	}
 
@@ -3151,18 +3162,9 @@ func (fbo *folderBranchOps) renameLocked(
 		return err
 	}
 
-	// Nothing below here can fail, so no need to clean up the dir
-	// entry cache on a failure.  If this ever panics, we need to add
-	// cleanup code.
-	defer func() {
-		if err != nil {
-			panic("Need cleanup code")
-		}
-	}()
-
 	// Only the ctime changes on the directory entry itself.
 	newDe.Ctime = fbo.nowUnixNano()
-	_ = fbo.blocks.RenameDirEntryInCache(
+	dirCacheUndoFn := fbo.blocks.RenameDirEntryInCache(
 		lState, oldParentPath, oldName, newParentPath, newName, newDe,
 		replacedDe)
 	cdo := cachedDirOp{ro, []Node{oldParent}}
@@ -3170,15 +3172,27 @@ func (fbo *folderBranchOps) renameLocked(
 		cdo.nodes = append(cdo.nodes, newParent)
 	}
 	fbo.dirOps = append(fbo.dirOps, cdo)
+	var addedNodes []Node
 	for _, n := range cdo.nodes {
-		fbo.status.addDirtyNode(n)
+		added := fbo.status.addDirtyNode(n)
+		if added {
+			addedNodes = append(addedNodes, n)
+		}
 	}
 	fbo.signalWrite()
 
+	defer func() {
+		if err != nil {
+			for _, n := range addedNodes {
+				fbo.status.rmDirtyNode(n)
+			}
+			fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+			dirCacheUndoFn(lState)
+		}
+	}()
+
 	err = fbo.notifyOneOp(ctx, lState, ro, md.ReadOnly(), false)
 	if err != nil {
-		// Inentionally trigger the panic above, since this should
-		// never happen.
 		return err
 	}
 
@@ -3410,26 +3424,26 @@ func (fbo *folderBranchOps) setExLocked(
 		return nil
 	}
 
-	// Nothing below here can fail, so no need to clean up the dir
-	// entry cache on a failure.  If this ever panics, we need to add
-	// cleanup code.
+	sao.setFinalPath(filePath)
+
+	dirCacheUndoFn := fbo.blocks.SetAttrInDirEntryInCache(
+		lState, filePath, de, sao.Attr)
+	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
+	added := fbo.status.addDirtyNode(file)
+	fbo.signalWrite()
+
 	defer func() {
 		if err != nil {
-			panic("Need cleanup code")
+			if added {
+				fbo.status.rmDirtyNode(file)
+			}
+			fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+			dirCacheUndoFn(lState)
 		}
 	}()
 
-	sao.setFinalPath(filePath)
-
-	_ = fbo.blocks.SetAttrInDirEntryInCache(lState, filePath, de, sao.Attr)
-	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
-	fbo.status.addDirtyNode(file)
-	fbo.signalWrite()
-
 	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
 	if err != nil {
-		// Inentionally trigger the panic above, since this should
-		// never happen.
 		return err
 	}
 
@@ -3498,26 +3512,26 @@ func (fbo *folderBranchOps) setMtimeLocked(
 		return nil
 	}
 
-	// Nothing below here can fail, so no need to clean up the dir
-	// entry cache on a failure.  If this ever panics, we need to add
-	// cleanup code.
+	sao.setFinalPath(filePath)
+
+	dirCacheUndoFn := fbo.blocks.SetAttrInDirEntryInCache(
+		lState, filePath, de, sao.Attr)
+	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
+	added := fbo.status.addDirtyNode(file)
+	fbo.signalWrite()
+
 	defer func() {
 		if err != nil {
-			panic("Need cleanup code")
+			if added {
+				fbo.status.rmDirtyNode(file)
+			}
+			fbo.dirOps = fbo.dirOps[:len(fbo.dirOps)-1]
+			dirCacheUndoFn(lState)
 		}
 	}()
 
-	sao.setFinalPath(filePath)
-
-	_ = fbo.blocks.SetAttrInDirEntryInCache(lState, filePath, de, sao.Attr)
-	fbo.dirOps = append(fbo.dirOps, cachedDirOp{sao, []Node{file}})
-	fbo.status.addDirtyNode(file)
-	fbo.signalWrite()
-
 	err = fbo.notifyOneOp(ctx, lState, sao, md.ReadOnly(), false)
 	if err != nil {
-		// Inentionally trigger the panic above, since this should
-		// never happen.
 		return err
 	}
 
