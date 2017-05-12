@@ -446,7 +446,7 @@ func (j mdJournal) getMDAndExtra(entry mdIDJournalEntry, verifyBranchID bool) (
 
 	// Check integrity.
 
-	mdID, err := j.crypto.MakeMdID(rmd)
+	mdID, err := tlf.MakeMdID(j.codec, rmd)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
@@ -495,7 +495,7 @@ func (j mdJournal) putMD(rmd BareRootMetadata) (tlf.MdID, error) {
 		return tlf.MdID{}, err
 	}
 
-	id, err := j.crypto.MakeMdID(rmd)
+	id, err := tlf.MakeMdID(j.codec, rmd)
 	if err != nil {
 		return tlf.MdID{}, err
 	}
@@ -891,7 +891,7 @@ func (j *mdJournal) removeFlushedEntry(
 	return nil
 }
 
-func getMdID(ctx context.Context, mdserver MDServer, crypto cryptoPure,
+func getMdID(ctx context.Context, mdserver MDServer, codec kbfscodec.Codec,
 	tlfID tlf.ID, bid BranchID, mStatus MergeStatus,
 	revision kbfsmd.Revision) (tlf.MdID, error) {
 	rmdses, err := mdserver.GetRange(
@@ -906,7 +906,7 @@ func getMdID(ctx context.Context, mdserver MDServer, crypto cryptoPure,
 			revision, bid, tlfID)
 	}
 
-	return crypto.MakeMdID(rmdses[0].MD)
+	return tlf.MakeMdID(codec, rmdses[0].MD)
 }
 
 // clearHelper removes all the journal entries starting from
