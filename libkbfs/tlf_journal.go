@@ -17,6 +17,7 @@ import (
 	"github.com/keybase/kbfs/kbfsblock"
 	"github.com/keybase/kbfs/kbfscodec"
 	"github.com/keybase/kbfs/kbfscrypto"
+	"github.com/keybase/kbfs/kbfsmd"
 	"github.com/keybase/kbfs/kbfssync"
 	"github.com/keybase/kbfs/tlf"
 	"github.com/pkg/errors"
@@ -95,8 +96,8 @@ const (
 // JSON.
 type TLFJournalStatus struct {
 	Dir           string
-	RevisionStart tlf.MetadataRevision
-	RevisionEnd   tlf.MetadataRevision
+	RevisionStart kbfsmd.Revision
+	RevisionEnd   kbfsmd.Revision
 	BranchID      string
 	BlockOpCount  uint64
 	// The byte counters below are signed because
@@ -670,11 +671,11 @@ func (j *tlfJournal) checkEnabledLocked() error {
 }
 
 func (j *tlfJournal) getJournalEnds(ctx context.Context) (
-	blockEnd journalOrdinal, mdEnd tlf.MetadataRevision, err error) {
+	blockEnd journalOrdinal, mdEnd kbfsmd.Revision, err error) {
 	j.journalLock.RLock()
 	defer j.journalLock.RUnlock()
 	if err := j.checkEnabledLocked(); err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, err
+		return 0, kbfsmd.RevisionUninitialized, err
 	}
 
 	blockEnd, err = j.blockJournal.end()
@@ -748,7 +749,7 @@ func (j *tlfJournal) flush(ctx context.Context) (err error) {
 			return err
 		}
 
-		if blockEnd == 0 && mdEnd == tlf.MetadataRevisionUninitialized {
+		if blockEnd == 0 && mdEnd == kbfsmd.RevisionUninitialized {
 			j.log.CDebugf(ctx, "Nothing else to flush")
 			break
 		}
@@ -819,11 +820,11 @@ func (e errTLFJournalNotEmpty) Error() string {
 
 func (j *tlfJournal) getNextBlockEntriesToFlush(
 	ctx context.Context, end journalOrdinal) (
-	entries blockEntriesToFlush, maxMDRevToFlush tlf.MetadataRevision, err error) {
+	entries blockEntriesToFlush, maxMDRevToFlush kbfsmd.Revision, err error) {
 	j.journalLock.RLock()
 	defer j.journalLock.RUnlock()
 	if err := j.checkEnabledLocked(); err != nil {
-		return blockEntriesToFlush{}, tlf.MetadataRevisionUninitialized, err
+		return blockEntriesToFlush{}, kbfsmd.RevisionUninitialized, err
 	}
 
 	return j.blockJournal.getNextEntriesToFlush(ctx, end,
@@ -863,11 +864,11 @@ func (j *tlfJournal) removeFlushedBlockEntries(ctx context.Context,
 
 func (j *tlfJournal) flushBlockEntries(
 	ctx context.Context, end journalOrdinal) (
-	numFlushed int, maxMDRevToFlush tlf.MetadataRevision,
+	numFlushed int, maxMDRevToFlush kbfsmd.Revision,
 	converted bool, err error) {
 	entries, maxMDRevToFlush, err := j.getNextBlockEntriesToFlush(ctx, end)
 	if err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, false, err
+		return 0, kbfsmd.RevisionUninitialized, false, err
 	}
 
 	if entries.length() == 0 {
@@ -880,7 +881,7 @@ func (j *tlfJournal) flushBlockEntries(
 	// Mark these blocks as flushing, and clear when done.
 	err = j.markFlushingBlockIDs(entries)
 	if err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, false, err
+		return 0, kbfsmd.RevisionUninitialized, false, err
 	}
 	cleared := false
 	defer func() {
@@ -944,18 +945,18 @@ func (j *tlfJournal) flushBlockEntries(
 
 	err = eg.Wait()
 	if err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, false, err
+		return 0, kbfsmd.RevisionUninitialized, false, err
 	}
 
 	err = j.clearFlushingBlockIDs(entries)
 	cleared = true
 	if err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, false, err
+		return 0, kbfsmd.RevisionUninitialized, false, err
 	}
 
 	err = j.removeFlushedBlockEntries(ctx, entries)
 	if err != nil {
-		return 0, tlf.MetadataRevisionUninitialized, false, err
+		return 0, kbfsmd.RevisionUninitialized, false, err
 	}
 
 	// TODO: If both the block and MD journals are empty, nuke the
@@ -966,16 +967,16 @@ func (j *tlfJournal) flushBlockEntries(
 	// local squash.  TODO: conversion might not have actually
 	// happened yet, in which case it's still ok to flush
 	// maxMDRevToFlush.
-	if converted && maxMDRevToFlush != tlf.MetadataRevisionUninitialized &&
+	if converted && maxMDRevToFlush != kbfsmd.RevisionUninitialized &&
 		!entries.revIsLocalSquash(maxMDRevToFlush) {
-		maxMDRevToFlush = tlf.MetadataRevisionUninitialized
+		maxMDRevToFlush = kbfsmd.RevisionUninitialized
 	}
 
 	return entries.length(), maxMDRevToFlush, converted, nil
 }
 
 func (j *tlfJournal) getNextMDEntryToFlush(ctx context.Context,
-	end tlf.MetadataRevision) (MdID, *RootMetadataSigned, ExtraMetadata, error) {
+	end kbfsmd.Revision) (MdID, *RootMetadataSigned, ExtraMetadata, error) {
 	j.journalLock.RLock()
 	defer j.journalLock.RUnlock()
 	if err := j.checkEnabledLocked(); err != nil {
@@ -1201,9 +1202,9 @@ func (j *tlfJournal) removeFlushedMDEntry(ctx context.Context,
 }
 
 func (j *tlfJournal) flushOneMDOp(
-	ctx context.Context, end tlf.MetadataRevision,
-	maxMDRevToFlush tlf.MetadataRevision) (flushed bool, err error) {
-	if maxMDRevToFlush == tlf.MetadataRevisionUninitialized {
+	ctx context.Context, end kbfsmd.Revision,
+	maxMDRevToFlush kbfsmd.Revision) (flushed bool, err error) {
+	if maxMDRevToFlush == kbfsmd.RevisionUninitialized {
 		// Short-cut `getNextMDEntryToFlush`, which would otherwise read
 		// an MD from disk and sign it unnecessarily.
 		return false, nil
@@ -1369,7 +1370,7 @@ func (j *tlfJournal) getJournalStatusWithRange() (
 		return jStatus, unflushedPaths, nil, true, nil
 	}
 
-	if jStatus.RevisionEnd == tlf.MetadataRevisionUninitialized {
+	if jStatus.RevisionEnd == kbfsmd.RevisionUninitialized {
 		return jStatus, nil, nil, true, nil
 	}
 
@@ -1868,7 +1869,7 @@ func (j *tlfJournal) getMDHead(
 }
 
 func (j *tlfJournal) getMDRange(
-	ctx context.Context, bid BranchID, start, stop tlf.MetadataRevision) (
+	ctx context.Context, bid BranchID, start, stop kbfsmd.Revision) (
 	[]ImmutableBareRootMetadata, error) {
 	j.journalLock.RLock()
 	defer j.journalLock.RUnlock()
@@ -1897,7 +1898,7 @@ func (j *tlfJournal) doPutMD(ctx context.Context, rmd *RootMetadata,
 
 	// Treat the first revision as a squash, so that it doesn't end up
 	// as the earliest revision in a range during a CR squash.
-	isFirstRev := rmd.Revision() == tlf.MetadataRevisionInitial
+	isFirstRev := rmd.Revision() == kbfsmd.RevisionInitial
 
 	// TODO: remove the revision from the cache on any errors below?
 	// Tricky when the append is only queued.

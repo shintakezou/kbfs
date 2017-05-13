@@ -13,6 +13,7 @@ import (
 	"github.com/keybase/kbfs/ioutil"
 	"github.com/keybase/kbfs/kbfscodec"
 	"github.com/keybase/kbfs/kbfscrypto"
+	"github.com/keybase/kbfs/kbfsmd"
 	"github.com/keybase/kbfs/tlf"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
@@ -83,7 +84,7 @@ func (ibrmd ImmutableBareRootMetadata) MakeBareTlfHandleWithExtra() (
 // dir/rkbv3/0100...ff
 //
 // There's a single journal subdirectory; the journal ordinals are
-// just MetadataRevisions, and the journal entries are just MdIDs.
+// just Revisions, and the journal entries are just MdIDs.
 //
 // The Metadata objects are stored separately in dir/mds. Each MD has
 // its own subdirectory with its ID truncated to 17 bytes (34
@@ -811,7 +812,7 @@ func (j *mdJournal) convertToBranch(
 // no next journal entry to flush, the returned MdID will be zero, and
 // the returned *RootMetadataSigned will be nil.
 func (j mdJournal) getNextEntryToFlush(
-	ctx context.Context, end tlf.MetadataRevision, signer kbfscrypto.Signer) (
+	ctx context.Context, end kbfsmd.Revision, signer kbfscrypto.Signer) (
 	MdID, *RootMetadataSigned, ExtraMetadata, error) {
 	mdID, rmd, extra, timestamp, err := j.getEarliestWithExtra(true)
 	if err != nil {
@@ -892,7 +893,7 @@ func (j *mdJournal) removeFlushedEntry(
 
 func getMdID(ctx context.Context, mdserver MDServer, crypto cryptoPure,
 	tlfID tlf.ID, bid BranchID, mStatus MergeStatus,
-	revision tlf.MetadataRevision) (MdID, error) {
+	revision kbfsmd.Revision) (MdID, error) {
 	rmdses, err := mdserver.GetRange(
 		ctx, tlfID, bid, mStatus, revision, revision)
 	if err != nil {
@@ -920,7 +921,7 @@ func getMdID(ctx context.Context, mdserver MDServer, crypto cryptoPure,
 // prefix of existing local squashes, so they can be re-used in the
 // newly-resolved journal.
 func (j *mdJournal) clearHelper(ctx context.Context, bid BranchID,
-	earliestBranchRevision tlf.MetadataRevision) (err error) {
+	earliestBranchRevision kbfsmd.Revision) (err error) {
 	j.log.CDebugf(ctx, "Clearing journal for branch %s", bid)
 	defer func() {
 		if err != nil {
@@ -991,11 +992,11 @@ func (j *mdJournal) clearHelper(ctx context.Context, bid BranchID,
 
 // All functions below are public functions.
 
-func (j mdJournal) readEarliestRevision() (tlf.MetadataRevision, error) {
+func (j mdJournal) readEarliestRevision() (kbfsmd.Revision, error) {
 	return j.j.readEarliestRevision()
 }
 
-func (j mdJournal) readLatestRevision() (tlf.MetadataRevision, error) {
+func (j mdJournal) readLatestRevision() (kbfsmd.Revision, error) {
 	return j.j.readLatestRevision()
 }
 
@@ -1020,7 +1021,7 @@ func (j mdJournal) atLeastNNonLocalSquashes(
 	// `numNonLocalSquashes` entries ago, and see if it's a local
 	// squash or not.
 	entry, err := j.j.readJournalEntry(
-		latestRev - tlf.MetadataRevision(numNonLocalSquashes) + 1)
+		latestRev - kbfsmd.Revision(numNonLocalSquashes) + 1)
 	if err != nil {
 		return false, err
 	}
@@ -1028,7 +1029,7 @@ func (j mdJournal) atLeastNNonLocalSquashes(
 	return !entry.IsLocalSquash, nil
 }
 
-func (j mdJournal) end() (tlf.MetadataRevision, error) {
+func (j mdJournal) end() (kbfsmd.Revision, error) {
 	return j.j.end()
 }
 
@@ -1084,7 +1085,7 @@ func (j mdJournal) getHead(bid BranchID) (ImmutableBareRootMetadata, error) {
 	return ImmutableBareRootMetadata{}, nil
 }
 
-func (j mdJournal) getRange(bid BranchID, start, stop tlf.MetadataRevision) (
+func (j mdJournal) getRange(bid BranchID, start, stop kbfsmd.Revision) (
 	[]ImmutableBareRootMetadata, error) {
 	head, err := j.checkGetParams()
 	if err != nil {
@@ -1115,7 +1116,7 @@ func (j mdJournal) getRange(bid BranchID, start, stop tlf.MetadataRevision) (
 			continue
 		}
 
-		expectedRevision := realStart + tlf.MetadataRevision(i)
+		expectedRevision := realStart + kbfsmd.Revision(i)
 		brmd, extra, ts, err := j.getMDAndExtra(entry, true)
 		if err != nil {
 			return nil, err
@@ -1380,7 +1381,7 @@ func (j *mdJournal) clear(ctx context.Context, bid BranchID) error {
 		return err
 	}
 
-	if earliestBranchRevision != tlf.MetadataRevisionUninitialized &&
+	if earliestBranchRevision != kbfsmd.RevisionUninitialized &&
 		bid == PendingLocalSquashBranchID {
 		latestRevision, err := j.j.readLatestRevision()
 		if err != nil {
