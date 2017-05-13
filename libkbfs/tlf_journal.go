@@ -976,13 +976,7 @@ func (j *tlfJournal) flushBlockEntries(
 }
 
 func (j *tlfJournal) getNextMDEntryToFlush(ctx context.Context,
-<<<<<<< HEAD
-	end kbfsmd.Revision) (MdID, *RootMetadataSigned, ExtraMetadata, error) {
-||||||| merged common ancestors
-	end tlf.MetadataRevision) (MdID, *RootMetadataSigned, ExtraMetadata, error) {
-=======
-	end tlf.MetadataRevision) (tlf.MdID, *RootMetadataSigned, ExtraMetadata, error) {
->>>>>>> Move MdID over, fix libkbfs install
+	end kbfsmd.Revision) (tlf.MdID, *RootMetadataSigned, ExtraMetadata, error) {
 	j.journalLock.RLock()
 	defer j.journalLock.RUnlock()
 	if err := j.checkEnabledLocked(); err != nil {
